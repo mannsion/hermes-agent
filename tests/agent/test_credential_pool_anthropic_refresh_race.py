@@ -67,7 +67,7 @@ def _fake_pool_store(monkeypatch):
     other's persisted writes (exactly what the real cross-process recovery
     path depends on), without touching the real filesystem.
     """
-    store: Dict[str, list] = {}
+    store: dict[str, list] = {}
 
     def _write(provider, entries, *, removed_ids=None, status_cleared_ids=None):
         store[provider] = list(entries)
@@ -244,13 +244,17 @@ def test_concurrent_hermes_pkce_refresh_loses_credential_despite_valid_token_on_
     )
 
 
-def test_concurrent_claude_code_refresh_recovers_via_credentials_file(monkeypatch):
+def test_concurrent_claude_code_refresh_recovers_via_credentials_file(monkeypatch, tmp_path):
     """Contrast case: entry.source == 'claude_code' DOES recover from a lost
     race, because ``_sync_anthropic_entry_from_credentials_file`` re-reads
     ``~/.claude/.credentials.json`` on failure. This asymmetry is itself
     evidence that hermes_pkce/dashboard-sourced credentials were simply
     never given the same treatment, not that recovery is impossible.
     """
+    monkeypatch.setattr(
+        "agent.anthropic_credentials.claude_code_credentials_path",
+        lambda: tmp_path / "claude" / ".credentials.json",
+    )
     server = _SingleUseTokenServer()
     monkeypatch.setattr(
         "agent.anthropic_credentials.refresh_anthropic_oauth_pure",

@@ -24,6 +24,7 @@ from hermes_cli.auth_constants import (
     CODEX_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, CODEX_OAUTH_CLIENT_ID, CODEX_OAUTH_TOKEN_URL,
     CODEX_OAUTH_USER_AGENT, CODEX_RATE_LIMITED_CODE, DEFAULT_CODEX_BASE_URL, _codex_err, httpx)
 from utils import env_float
+from hermes_cli.provider_policy import get_provider_auth_policy
 
 if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
     from hermes_cli.auth import ProviderConfig
@@ -62,7 +63,9 @@ def _codex_access_token_is_expiring(access_token: Any, skew_seconds: int) -> boo
 
 
 def _codex_base_url() -> str:
-    return os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/") or DEFAULT_CODEX_BASE_URL
+    policy = get_provider_auth_policy()
+    override = policy.env_value("HERMES_CODEX_BASE_URL") if policy.config_only else os.getenv("HERMES_CODEX_BASE_URL", "")
+    return override.strip().rstrip("/") or DEFAULT_CODEX_BASE_URL
 
 
 def _codex_runtime_result(
@@ -103,7 +106,8 @@ def _read_codex_tokens(*, _lock: bool = True) -> Dict[str, Any]:
 
 def _sync_codex_pool_entries(
     auth_store: Dict[str, Any], tokens: Dict[str, str], last_refresh: Optional[str],
-    previous_singleton_tokens: Optional[Dict[str, str]] = None) -> None:
+    previous_singleton_tokens: Optional[Dict[str, str]] = None,
+    provenance: Optional[Dict[str, str]] = None) -> None:
     """Mirror a fresh Codex re-auth into the credential_pool OAuth entries.
 
     ``device_code`` (the singleton-seeded entry from ``hermes setup`` / the model picker) is always
@@ -135,6 +139,8 @@ def _sync_codex_pool_entries(
         if not (source == "device_code" or is_alias):
             continue
         entry["access_token"] = access_token
+        if provenance is not None:
+            entry["provenance"] = provenance
         if refresh_token:
             entry["refresh_token"] = refresh_token
         if last_refresh:
@@ -142,7 +148,10 @@ def _sync_codex_pool_entries(
         _clear_pool_entry_status(entry)
 
 
-def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None, label: str = None) -> None:
+def _save_codex_tokens(
+    tokens: Dict[str, str], last_refresh: str = None, label: str = None,
+    *, provenance: Optional[Dict[str, str]] = None,
+) -> None:
     """Save Codex OAuth tokens to Hermes auth store (~/.hermes/auth.json)."""
     from hermes_cli.auth import (
         _auth_store_lock, _load_auth_store, _load_provider_state, _save_auth_store,
@@ -157,17 +166,23 @@ def _save_codex_tokens(tokens: Dict[str, str], last_refresh: str = None, label: 
         previous_singleton_tokens = (
             state.get("tokens") if isinstance(state.get("tokens"), dict) else None)
         state.update(tokens=tokens, last_refresh=last_refresh, auth_mode="chatgpt")
+        recorded_provenance = provenance or tokens.get("provenance")
+        if recorded_provenance:
+            state["provenance"] = recorded_provenance
         if label and str(label).strip():
             state["label"] = str(label).strip()
         _save_provider_state(auth_store, "openai-codex", state)
         _sync_codex_pool_entries(
-            auth_store, tokens, last_refresh, previous_singleton_tokens=previous_singleton_tokens)
+            auth_store, tokens, last_refresh, previous_singleton_tokens=previous_singleton_tokens,
+            provenance=state.get("provenance"))
         _save_auth_store(auth_store)
 
 
 def _recover_codex_tokens_from_cli(reason: str) -> Optional[Dict[str, str]]:
     """Adopt a valid Codex CLI token pair into Hermes auth, if available."""
     from hermes_cli.auth import _import_codex_cli_tokens, _save_codex_tokens
+    if get_provider_auth_policy().config_only:
+        return None
     imported = _import_codex_cli_tokens()
     # Require BOTH tokens before adopting: persisting a payload without a usable refresh_token
     # would only break the next refresh cycle.
@@ -175,7 +190,7 @@ def _recover_codex_tokens_from_cli(reason: str) -> Optional[Dict[str, str]]:
             and _stripped(imported.get("refresh_token"))):
         return None
     logger.info("Codex auth recovered from Codex CLI auth.json (%s).", reason)
-    _save_codex_tokens(imported)
+    _save_codex_tokens(imported, provenance={"source": "external_store"})
     return dict(imported)
 
 
@@ -357,6 +372,8 @@ def _refresh_codex_auth_tokens(tokens: Dict[str, str], timeout_seconds: float) -
 def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
     """Read ~/.codex/auth.json (Codex CLI file) tokens if valid and not expired; never writes."""
     from hermes_cli.auth import _codex_access_token_is_expiring
+    if get_provider_auth_policy().config_only:
+        return None
     codex_home = os.getenv("CODEX_HOME", "").strip() or str(Path.home() / ".codex")
     auth_path = Path(codex_home).expanduser() / "auth.json"
     if not auth_path.is_file():
@@ -579,7 +596,11 @@ def _codex_pool_dicts(entries: Optional[List[Any]]) -> Iterator[Dict[str, Any]]:
 
 def _read_codex_pool_entries() -> Optional[List[Any]]:
     """Locked read of ``credential_pool.openai-codex`` from auth.json (None when absent)."""
-    from hermes_cli.auth import _auth_store_lock, _load_auth_store
+    from hermes_cli.auth import _auth_store_lock, _load_auth_store, read_credential_pool
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        policy.require_provider("openai-codex")
+        return read_credential_pool("openai-codex")
     with _auth_store_lock():
         auth_store = _load_auth_store()
     return _pool_entries(auth_store, "openai-codex")
@@ -651,7 +672,7 @@ def _login_openai_codex(args, pconfig: ProviderConfig, *, force_new_login: bool 
             print("Hermes will create its own session to avoid conflicts with Codex CLI / VS Code.")
             if _prompt_yes_no(
                 "Import these credentials? (a separate login is recommended) [y/N]: ", default="n"):
-                _save_codex_tokens(cli_tokens)
+                _save_codex_tokens(cli_tokens, provenance={"source": "external_store"})
                 config_path = _update_config_for_provider("openai-codex", _codex_base_url())
                 print()
                 print("Credentials imported. Note: if Codex CLI refreshes its token,")
@@ -799,6 +820,7 @@ def _codex_device_code_login() -> Dict[str, Any]:
     return {
         "tokens": {
             "access_token": tokens.get("access_token", ""),
-            "refresh_token": tokens.get("refresh_token", "")},
+            "refresh_token": tokens.get("refresh_token", ""),
+            "provenance": get_provider_auth_policy().local_provenance("local_login")},
         "base_url": _codex_base_url(), "last_refresh": _utc_now_z(), "auth_mode": "chatgpt",
         "source": "device-code"}

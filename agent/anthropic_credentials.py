@@ -27,6 +27,7 @@ from typing import Any, Dict, Optional
 
 from hermes_constants import get_hermes_home
 from agent.secret_scope import get_secret as _get_secret
+from hermes_cli.provider_policy import get_provider_auth_policy
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,9 @@ _OAUTH_SCOPES = "org:create_api_key user:profile user:inference"
 
 def _getenv(name: str, default: str = "") -> str:
     """Profile-scoped os.getenv for credential reads (fail-closed on unscoped reads when multiplexing)."""
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        return policy.env_value(name, default)
     val = _get_secret(name, default)
     return val if val is not None else default
 
@@ -128,6 +132,8 @@ def _spent_rotation_sidecar_path(source_path: Path) -> Path:
 
 def spent_rotation_source_path(source: Any) -> Optional[Path]:
     """Map a pool-entry source to the shared singleton file it borrows from (or None)."""
+    if get_provider_auth_policy().config_only and source == "claude_code":
+        return None
     getter = _SINGLETON_SOURCE_PATHS.get(source) if isinstance(source, str) else None
     return getter() if getter else None
 
@@ -215,6 +221,8 @@ def _claude_oauth_record(data: Any, source: str) -> Optional[Dict[str, Any]]:
 
 def _read_claude_code_credentials_from_keychain() -> Optional[Dict[str, Any]]:
     """Read the "Claude Code-credentials" macOS Keychain entry (Claude Code >=2.1.114)."""
+    if get_provider_auth_policy().config_only:
+        return None
     if platform.system() != "Darwin":
         return None
     try:
@@ -242,6 +250,8 @@ def claude_code_credentials_path() -> Path:
 
 
 def _read_claude_code_credentials_from_file() -> Optional[Dict[str, Any]]:
+    if get_provider_auth_policy().config_only:
+        return None
     data = _load_json_if_exists(claude_code_credentials_path(), "~/.claude/.credentials.json")
     return _claude_oauth_record(data, "claude_code_credentials_file") if data is not None else None
 
@@ -250,6 +260,8 @@ def read_claude_code_credentials() -> Optional[Dict[str, Any]]:
     """Read refreshable Claude Code OAuth credentials (Keychain and/or file). When both exist: prefer the only
     non-expired one (Claude Code 2.1.x refreshes one source but not the other), else the later ``expiresAt`` so a
     refresh uses the freshest refreshToken. ~/.claude.json primaryApiKey is deliberately excluded."""
+    if get_provider_auth_policy().config_only:
+        return None
     kc_creds = _read_claude_code_credentials_from_keychain()
     file_creds = _read_claude_code_credentials_from_file()
     if not (kc_creds and file_creds):
@@ -317,6 +329,8 @@ def _refresh_oauth_token(creds: Dict[str, Any]) -> Optional[str]:
     Claude Code refreshes on its own schedule, so we first re-read the live sources and adopt an already-rotated
     token instead of racing it into ``invalid_grant``. Read, decision, POST and write-back share the pool's
     path-keyed cross-process lock (else two profiles can spend one refresh token)."""
+    if get_provider_auth_policy().config_only:
+        return None
     try:
         from hermes_cli.auth import AUTH_LOCK_TIMEOUT_SECONDS, _auth_store_lock, env_float
         refresh_timeout_seconds = env_float("HERMES_ANTHROPIC_REFRESH_TIMEOUT_SECONDS", 20)
@@ -375,6 +389,7 @@ def _write_claude_code_credentials(
     """Commit refreshed credentials to ~/.claude/.credentials.json; ``CredentialPersistError`` on any failure (a
     corrupt existing file included). *scopes* (or the previously stored scopes) are persisted because Claude Code
     >=2.1.81 gates on ``"user:inference"`` being present."""
+    get_provider_auth_policy().require_external_source("Claude CLI OAuth store")
     cred_path = claude_code_credentials_path()
     try:
         existing = json.loads(cred_path.read_text(encoding="utf-8")) if cred_path.exists() else {}
@@ -395,6 +410,8 @@ def _write_claude_code_credentials(
 
 def _resolve_claude_code_token_from_credentials(creds: Optional[Dict[str, Any]] = None) -> Optional[str]:
     """Resolve a token from Claude Code credential files, refreshing if needed."""
+    if get_provider_auth_policy().config_only:
+        return None
     creds = creds or read_claude_code_credentials()
     if not creds:
         return None
@@ -454,6 +471,14 @@ def _resolve_anthropic_pool_token() -> Optional[str]:
 
 def resolve_anthropic_token() -> Optional[str]:
     """Resolve an Anthropic token from all sources in priority order (see module docstring)."""
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        policy.require_provider("anthropic")
+        entry = policy.provider_config("anthropic")
+        key_env = entry.get("key_env") or entry.get("api_key_env")
+        configured = entry.get("api_key") or (policy.env_value(str(key_env)) if key_env else "")
+        return (configured or _first_env("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY")
+                or _resolve_anthropic_pool_token())
     _read_creds = functools.cache(read_claude_code_credentials)  # read the file at most once per resolve
     token = _first_env("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     if token:
@@ -466,6 +491,7 @@ def resolve_anthropic_token() -> Optional[str]:
 
 def run_oauth_setup_token() -> Optional[str]:
     """Run 'claude setup-token' interactively; the resulting token or None. FileNotFoundError if no 'claude' CLI."""
+    get_provider_auth_policy().require_external_source("Claude CLI setup-token")
     import shutil
     claude_path = shutil.which("claude")
     if not claude_path:
@@ -485,12 +511,16 @@ def run_oauth_setup_token() -> Optional[str]:
 
 
 def _get_hermes_oauth_file() -> Path:
-    return get_hermes_home() / ".anthropic_oauth.json"
+    path = get_hermes_home() / ".anthropic_oauth.json"
+    policy = get_provider_auth_policy()
+    return policy.local_path(path) if policy.config_only else path
 
 
 def _root_hermes_oauth_file() -> Optional[Path]:
     """Global-root ``.anthropic_oauth.json`` inside a named profile (None in classic mode); used to commit a
     rotation of a grant the profile borrowed via the pool's root fallback."""
+    if get_provider_auth_policy().config_only:
+        return None
     try:
         from hermes_constants import get_default_hermes_root
         root = get_default_hermes_root()
@@ -558,24 +588,32 @@ def run_hermes_oauth_login_pure() -> Optional[Dict[str, Any]]:
     if not result.get("access_token"):
         print("No access token in response.")
         return None
-    return _oauth_token_state(result)
+    return {**_oauth_token_state(result), "provenance": get_provider_auth_policy().local_provenance("local_login")}
 
 
 def read_hermes_oauth_credentials() -> Optional[Dict[str, Any]]:
     """Read Hermes-managed OAuth credentials from ~/.hermes/.anthropic_oauth.json."""
     data = _load_json_if_exists(_get_hermes_oauth_file(), "Hermes OAuth credentials")
+    if data is not None and not get_provider_auth_policy().allows_record(data):
+        return None
     return data if data is not None and data.get("accessToken") else None
 
 
 def _write_hermes_oauth_credentials(
-    access_token: str, refresh_token: Optional[str], expires_at_ms: Optional[int], *, target: Optional[Path] = None
+    access_token: str, refresh_token: Optional[str], expires_at_ms: Optional[int], *, target: Optional[Path] = None,
+    provenance: Optional[Dict[str, str]] = None,
 ) -> None:
     """Commit refreshed hermes_pkce tokens to ~/.hermes/.anthropic_oauth.json (``CredentialPersistError`` on failure).
     ``target`` lets a named profile commit a grant it BORROWED from the global root back to the ROOT singleton
     instead of forking a copy under its own HERMES_HOME; without this write-through the next ``load_pool()``
     re-seeds the stale (consumed) pair from the file over the rotated pool entry."""
-    _commit_private_json(
-        target if target is not None else _get_hermes_oauth_file(),
-        {"accessToken": access_token, "refreshToken": refresh_token, "expiresAt": expires_at_ms},
-        "Hermes OAuth credentials",
-    )
+    path = target if target is not None else _get_hermes_oauth_file()
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        path = policy.local_path(path)
+    previous = _load_json_if_exists(path, "Hermes OAuth credentials") or {}
+    payload = {"accessToken": access_token, "refreshToken": refresh_token, "expiresAt": expires_at_ms}
+    recorded_provenance = provenance or previous.get("provenance")
+    if recorded_provenance:
+        payload["provenance"] = recorded_provenance
+    _commit_private_json(path, payload, "Hermes OAuth credentials")

@@ -40,6 +40,13 @@ runtime:
 # =============================================================================
 # Model Configuration
 # =============================================================================
+# Optional provider isolation: config_only uses only providers declared in this
+# home's config.yaml and literal local .env/native login credentials. Inherited
+# provider keys, external login stores, and automatic discovery are excluded.
+# Normal Hermes commands and configured model switching continue to work.
+provider_auth:
+  mode: auto  # auto (default) | config_only
+
 model:
   # Default model to use (can be overridden with --model flag)
   # Both "default" and "model" work as the key name here.

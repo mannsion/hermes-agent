@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Optional
 
 from hermes_cli._subprocess_compat import IS_WINDOWS, windows_hide_flags
+from hermes_cli.provider_policy import get_provider_auth_policy
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +52,22 @@ def resolve_copilot_token() -> tuple[str, str]:
 
     Raises ValueError if only a classic PAT is available.
     """
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        policy.require_provider("copilot")
+        config = policy.provider_config("copilot")
+        value = str(config.get("api_key") or "").strip()
+        key_env = config.get("key_env") or config.get("api_key_env")
+        if not value and key_env:
+            value = policy.env_value(str(key_env)).strip()
+        if value:
+            valid, message = validate_copilot_token(value)
+            if not valid:
+                raise ValueError(message)
+            return value, "config"
     any_env_var_set = False
     for env_var in COPILOT_ENV_VARS:
-        val = os.getenv(env_var, "").strip()
+        val = (policy.env_value(env_var) if policy.config_only else os.getenv(env_var, "")).strip()
         if not val:
             continue
         any_env_var_set = True
@@ -68,6 +82,8 @@ def resolve_copilot_token() -> tuple[str, str]:
         logger.debug("Copilot env var(s) set but none held a supported token; skipping `gh auth "
                      "token` fallback to honor explicit env-var intent (and avoid the subprocess "
                      "cost on cold start, #60800).")
+        return "", ""
+    if policy.config_only:
         return "", ""
     token = _try_gh_cli_token()
     if token:
@@ -104,6 +120,8 @@ def _invalidate_gh_cli_token_cache() -> None:
 def _try_gh_cli_token() -> Optional[str]:
     """Token from ``gh auth token`` when available; the result (incl. a miss) is cached per TTL."""
     global _gh_cli_token_cache
+    if get_provider_auth_policy().config_only:
+        return None
     now = time.monotonic()
     cache = _gh_cli_token_cache
     if cache is not None and now - cache[0] < _GH_CLI_TOKEN_CACHE_TTL_SECONDS:
@@ -115,6 +133,8 @@ def _try_gh_cli_token() -> Optional[str]:
 
 def _probe_gh_cli_token() -> Optional[str]:
     """Uncached ``gh auth token`` subprocess probe (see ``_try_gh_cli_token``)."""
+    if get_provider_auth_policy().config_only:
+        return None
     hostname = os.getenv("COPILOT_GH_HOST", "").strip()
     # gh must not short-circuit on GITHUB_TOKEN / GH_TOKEN, nor prompt from a backend process.
     clean_env = {k: v for k, v in os.environ.items() if k not in {"GITHUB_TOKEN", "GH_TOKEN"}}
@@ -243,7 +263,9 @@ _EXCHANGE_PERMANENT_HTTP_STATUSES = frozenset({401, 403, 404})
 
 def _token_fingerprint(raw_token: str) -> str:
     """Short fingerprint of a raw token for cache keying (avoids storing full token)."""
-    return hashlib.sha256(raw_token.encode()).hexdigest()[:16]
+    policy = get_provider_auth_policy()
+    material = f"{policy.cache_key}:{raw_token}" if policy.config_only else raw_token
+    return hashlib.sha256(material.encode()).hexdigest()[:16]
 
 
 def _read_jwt_store(path: Path) -> Optional[dict]:
@@ -276,7 +298,9 @@ def _jwt_disk_path() -> Optional[Path]:
     """Path to the on-disk exchanged-JWT cache (profile-aware), or None."""
     try:
         from hermes_constants import get_hermes_home
-        return Path(get_hermes_home()) / _JWT_DISK_FILENAME
+        path = Path(get_hermes_home()) / _JWT_DISK_FILENAME
+        policy = get_provider_auth_policy()
+        return policy.local_path(path) if policy.config_only else path
     except Exception:
         return None
 

@@ -14,8 +14,6 @@ returns ``(available, pending_refresh)`` and entries pending a refresh are
 NOT in ``available`` until the refresh has run.
 """
 
-import threading
-
 from agent.credential_pool import CredentialPool, PooledCredential
 
 
@@ -32,15 +30,9 @@ def _entry(entry_id: str) -> PooledCredential:
 
 
 def _bare_pool(entries):
-    """Minimal pool shell — avoids disk/keyring I/O in __init__."""
-    pool = CredentialPool.__new__(CredentialPool)
-    pool._lock = threading.RLock()
-    pool._entries = list(entries)
-    pool._active_leases = {}
-    pool._current_id = None
+    """Construct the native pool; only deferred-refresh behavior is stubbed below."""
+    pool = CredentialPool("anthropic", list(entries))
     pool._max_concurrent = 2
-    pool._unmatched_rotation_streak = 0
-    pool.provider = "anthropic"
     return pool
 
 

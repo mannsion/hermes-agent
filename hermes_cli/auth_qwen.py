@@ -12,6 +12,7 @@ import os
 import time
 from pathlib import Path
 from typing import Any, Dict
+from hermes_cli.provider_policy import get_provider_auth_policy
 from hermes_cli.auth_constants import (
     AuthError, DEFAULT_QWEN_BASE_URL, QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, QWEN_OAUTH_CLIENT_ID,
     QWEN_OAUTH_TOKEN_URL, _FORM_JSON_HEADERS, _qwen_err, httpx,
@@ -23,6 +24,7 @@ _RERUN = "Re-run 'qwen auth qwen-oauth'."
 
 
 def _qwen_cli_auth_path() -> Path:
+    get_provider_auth_policy().require_external_source("Qwen CLI OAuth store")
     return Path.home() / ".qwen" / "oauth_creds.json"
 
 
@@ -58,6 +60,7 @@ def _qwen_access_token_is_expiring(expiry_date_ms: Any, skew_seconds: int = QWEN
 
 
 def _refresh_qwen_cli_tokens(tokens: Dict[str, Any], timeout_seconds: float = 20.0) -> Dict[str, Any]:
+    get_provider_auth_policy().require_external_source("Qwen CLI OAuth refresh")
     refresh_token = str(tokens.get("refresh_token", "") or "").strip()
     if not refresh_token:
         raise _qwen_err(f"Qwen OAuth refresh token missing. {_RERUN}", "qwen_refresh_token_missing")

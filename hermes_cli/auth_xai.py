@@ -104,6 +104,9 @@ def _write_through_xai_oauth_to_global_root(state: Dict[str, Any]) -> None:
     must write the chain back to root. Touches only root ``providers.xai-oauth``; swallows all
     errors (root-stale is better than breaking the profile's own save).
     """
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        return
     from hermes_cli.auth import _global_auth_file_path, _persist_provider_state_to_store
     global_path = _global_auth_file_path()
     if global_path is None:  # classic mode (profile == root); the profile save already hit root
@@ -127,7 +130,7 @@ def _write_through_xai_oauth_to_global_root(state: Dict[str, Any]) -> None:
 def _save_xai_oauth_tokens(
     tokens: Dict[str, Any], *, discovery: Optional[Dict[str, Any]] = None, redirect_uri: str = "",
     last_refresh: Optional[str] = None, auth_mode: str = "oauth_device_code",
-    set_active: bool = True,
+    set_active: bool = True, provenance: Optional[Dict[str, str]] = None,
 ) -> None:
     """Persist xAI OAuth tokens; *set_active* also promotes ``xai-oauth`` to ``active_provider``.
 
@@ -145,6 +148,8 @@ def _save_xai_oauth_tokens(
         state, source_path = _load_provider_state_with_source(auth_store, "xai-oauth")
         state = state if state is not None else {}
         state.update(tokens=tokens, last_refresh=last_refresh, auth_mode=auth_mode)
+        if provenance is not None:
+            state["provenance"] = provenance
         if discovery:
             state["discovery"] = discovery
         if redirect_uri:
@@ -408,8 +413,11 @@ def _quarantine_xai_oauth_tokens(exc: AuthError) -> None:
 
 
 def _xai_oauth_inference_base_url() -> str:
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    getenv = policy.env_value if policy.config_only else os.getenv
     return _xai_validate_inference_base_url(
-        os.getenv("HERMES_XAI_BASE_URL", "").strip().rstrip("/") or os.getenv("XAI_BASE_URL", "").strip().rstrip("/"),
+        getenv("HERMES_XAI_BASE_URL", "").strip().rstrip("/") or getenv("XAI_BASE_URL", "").strip().rstrip("/"),
         fallback=DEFAULT_XAI_OAUTH_BASE_URL,
     )
 
@@ -491,7 +499,7 @@ def _login_xai_oauth(args, pconfig: ProviderConfig, *, force_new_login: bool = F
     _save_xai_oauth_tokens(
         creds["tokens"], discovery=creds.get("discovery"),
         redirect_uri=creds.get("redirect_uri", ""), last_refresh=creds.get("last_refresh"),
-        auth_mode="oauth_device_code",
+        auth_mode="oauth_device_code", provenance=creds.get("provenance"),
     )
     # Explicit re-login re-enables the credential: clear the ``device_code`` suppression marker left
     # by ``hermes auth remove xai-oauth``. Deliberately NOT inside _save_xai_oauth_tokens — the
@@ -575,7 +583,9 @@ def _xai_oauth_device_code_login(*, timeout_seconds: float = 20.0, open_browser:
     access_token, refresh_token = _token_pair(payload)
     if not access_token or not refresh_token:
         raise _xai_err("xAI device-code token response was missing required tokens.", "xai_device_token_invalid")
+    from hermes_cli.provider_policy import get_provider_auth_policy
     return {
+        "provenance": get_provider_auth_policy().local_provenance(),
         "tokens": _xai_tokens_from_payload(payload, access_token, refresh_token),
         "discovery": discovery, "redirect_uri": "", "base_url": _xai_oauth_inference_base_url(),
         "last_refresh": _utc_now_z(), "source": "oauth-device-code",

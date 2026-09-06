@@ -39,6 +39,7 @@ class TurnFacadeMixin:
         from agent import relay_runtime
         from agent.aux_accounting import reset_accounting_context, set_accounting_context
         from agent.auxiliary_client import scoped_runtime_main
+        from hermes_cli.provider_policy import get_provider_auth_policy, provider_auth_scope
         from agent.conversation_loop import run_conversation
         from agent.portal_tags import (
             reset_affinity_scope, reset_conversation_context, set_affinity_scope,
@@ -115,7 +116,8 @@ class TurnFacadeMixin:
             )
 
             # Keep the ContextVar scope local (agent tokens may be observed from another thread).
-            with bind_subagent_parent(self), scoped_runtime_main({}):
+            policy = getattr(self, "_provider_auth_policy", None) or get_provider_auth_policy()
+            with provider_auth_scope(policy), bind_subagent_parent(self), scoped_runtime_main({}):
                 try:
                     if lease is not None:
                         lease.start()
