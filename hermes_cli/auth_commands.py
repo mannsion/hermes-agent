@@ -325,6 +325,8 @@ def _add_api_key_credential(args, provider: str, pool) -> None:
     entry = PooledCredential(
         provider=provider, id=uuid.uuid4().hex[:6], label=label, auth_type=AUTH_TYPE_API_KEY,
         priority=0, source=SOURCE_MANUAL, access_token=token, base_url=_provider_base_url(provider))
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    entry.extra = {**(entry.extra or {}), "provenance": get_provider_auth_policy().local_provenance("local_key")}
     pool.add_entry(entry)
     print(f'Added {provider} credential #{len(pool.entries())}: "{label}"')
 
@@ -371,6 +373,8 @@ def auth_add_command(args) -> None:
         provider=provider, id=uuid.uuid4().hex[:6], label=label, auth_type=AUTH_TYPE_OAUTH, priority=0,
         source=spec.source, access_token=token, **spec.fields(creds, provider))
     first_credential = not pool.entries()
+    if creds.get("provenance"):
+        entry.extra = {**(entry.extra or {}), "provenance": creds["provenance"]}
     pool.add_entry(entry)
     # The first Codex/xAI credential becomes the active provider (as the old singleton save path
     # did implicitly); subsequent adds leave the active provider as-is.

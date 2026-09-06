@@ -1226,6 +1226,11 @@ def validate_config_structure(config: Optional[Dict[str, Any]] = None) -> List["
             return [ConfigIssue("error", "Could not load config.yaml", "Run 'hermes setup' to create a valid config")]
 
     issues: List[ConfigIssue] = []
+    from hermes_cli.provider_policy import ProviderPolicyError, validate_provider_auth
+    try:
+        validate_provider_auth(config)
+    except ProviderPolicyError as exc:
+        _issue(issues, "error", str(exc), "Set provider_auth.mode to auto or config_only")
     _validate_voice(config, issues)
     cp = config.get("custom_providers")
     fb = config.get("fallback_model")

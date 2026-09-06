@@ -20,6 +20,8 @@ def _aux(timeout, *, reasoning_effort=True, **extra):
 
 DEFAULT_CONFIG = {
     "model": "",
+    # config_only limits inference routes and credentials to this Hermes home.
+    "provider_auth": {"mode": "auto"},
     "providers": {},
     "fallback_providers": [],
     "credential_pool_strategies": {},

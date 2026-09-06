@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 from hermes_constants import OPENROUTER_BASE_URL
 from hermes_cli.config import load_env
 from agent.secret_scope import get_secret as _get_secret
+from agent.credential_pool_policy import pool_operation
 from agent.credential_persistence import (
     fingerprint_secret_value,
     is_borrowed_credential_source,
@@ -169,7 +170,7 @@ _EXTRA_KEYS = frozenset({
     # Providers return 403 for both an edge throttle and a spending limit, so the
     # raw status cannot size a cooldown; persisted so a restart doesn't downgrade
     # a billing bench to a 60s transient cooldown.
-    "failure_reason",
+    "failure_reason", "provenance",
 })
 
 # Nous singleton metadata mirrored between auth.json state and ``entry.extra``.
@@ -849,6 +850,12 @@ def persist_pool_entries(
     ``invalid_grant`` (#100339). Such rows are written back to the root store
     (under the root lock); everything else goes to the active store.
     """
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        write_credential_pool(
+            provider, payloads, removed_ids=removed_ids, status_cleared_ids=status_cleared_ids,
+        )
+        return
     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and not _profile_owns_pool_provider(provider):
         global_path = _borrowed_single_use_pool_root()
         if global_path is not None:
@@ -912,6 +919,8 @@ class _RefreshDone(Exception):
 
 class CredentialPool:
     def __init__(self, provider: str, entries: List[PooledCredential]):
+        from hermes_cli.provider_policy import get_provider_auth_policy
+        self._auth_policy = get_provider_auth_policy()
         self.provider = provider
         self._entries = sorted(entries, key=lambda entry: entry.priority)
         self._current_id: Optional[str] = None
@@ -939,10 +948,12 @@ class CredentialPool:
 
     # ---- read accessors ---------------------------------------------------
 
+    @pool_operation
     def has_credentials(self) -> bool:
         with self._lock:
             return bool(self._entries)
 
+    @pool_operation
     def has_available(self) -> bool:
         """True if at least one entry is not currently in exhaustion cooldown.
 
@@ -954,6 +965,7 @@ class CredentialPool:
             available, _pending = self._available_entries()
             return bool(available)
 
+    @pool_operation
     def next_available_at(self) -> Optional[float]:
         """Earliest epoch time (seconds) any entry re-enters rotation.
 
@@ -981,6 +993,7 @@ class CredentialPool:
             ]
             return min(candidates) if candidates else None
 
+    @pool_operation
     def entries(self) -> List[PooledCredential]:
         with self._lock:
             return list(self._entries)
@@ -997,6 +1010,7 @@ class CredentialPool:
             return None
         return self._find(lambda e: e.id == self._current_id)
 
+    @pool_operation
     def current(self) -> Optional[PooledCredential]:
         with self._lock:
             return self._current_unlocked()
@@ -1372,7 +1386,11 @@ class CredentialPool:
 
     # ---- refresh -----------------------------------------------------------
 
+    @pool_operation
     def _refresh_entry(self, entry: PooledCredential, *, force: bool) -> Optional[PooledCredential]:
+        from hermes_cli.provider_policy import get_provider_auth_policy, ProviderPolicyError
+        if not get_provider_auth_policy().allows_record(entry.to_dict()):
+            raise ProviderPolicyError("Credential refresh requires a login or key saved in this Hermes home")
         if entry.auth_type != AUTH_TYPE_OAUTH or not entry.refresh_token:
             if force:
                 self._mark_exhausted(entry, None)
@@ -1508,7 +1526,10 @@ class CredentialPool:
             if entry.source == "claude_code":
                 ac._write_claude_code_credentials(*args)
             else:
-                ac._write_hermes_oauth_credentials(*args, target=_singleton_target_for_entry(self, entry))
+                ac._write_hermes_oauth_credentials(
+                    *args, target=_singleton_target_for_entry(self, entry),
+                    provenance=entry.extra.get("provenance"),
+                )
         except Exception as wexc:
             # Authoritative commit failed: do not mark, persist or return the
             # rotation as successful, and bypass the re-POST recovery path —
@@ -1771,6 +1792,7 @@ class CredentialPool:
 
     # ---- selection ---------------------------------------------------------
 
+    @pool_operation
     def select(self) -> Optional[PooledCredential]:
         entry, pending_refresh = self._select_under_lock()
         if pending_refresh:
@@ -1811,6 +1833,7 @@ class CredentialPool:
             return self._sync_nous_entry_from_auth_store(entry)
         return self._sync_entry_from_auth_store(entry)
 
+    @pool_operation
     def _available_entries(
         self, *, clear_expired: bool = False, refresh: bool = False,
     ) -> Tuple[List[PooledCredential], List[PooledCredential]]:
@@ -1933,6 +1956,7 @@ class CredentialPool:
         self._current_id = entry.id
         return entry, pending_refresh
 
+    @pool_operation
     def peek(self) -> Optional[PooledCredential]:
         with self._lock:
             current = self._current_unlocked()
@@ -2013,6 +2037,7 @@ class CredentialPool:
             return None
         return next_entry
 
+    @pool_operation
     def mark_exhausted_and_rotate(
         self,
         *,
@@ -2070,6 +2095,7 @@ class CredentialPool:
 
     # ---- leases ------------------------------------------------------------
 
+    @pool_operation
     def acquire_lease(self, credential_id: Optional[str] = None) -> Optional[str]:
         """Acquire a soft lease on a credential.
 
@@ -2120,10 +2146,12 @@ class CredentialPool:
 
     # ---- explicit refresh / admin ------------------------------------------
 
+    @pool_operation
     def try_refresh_current(self) -> Optional[PooledCredential]:
         with self._lock:
             return self._try_refresh_current_unlocked()
 
+    @pool_operation
     def try_refresh_matching(
         self,
         api_key_hint: Optional[str] = None,
@@ -2382,10 +2410,8 @@ def _seed_anthropic_singletons(seed: _Seeder) -> None:
     # forces the Claude Code identity injection, `mcp_` tool-name rewrite and
     # claude-cli User-Agent the user explicitly opted out of. Prefer
     # ~/.hermes/.env over os.environ, as `_seed_from_env` does.
-    _env_file = load_env()
-
     def _env_val(key: str) -> str:
-        return (_env_file.get(key) or _get_secret(key, "") or "").strip()
+        return get_env_prefer_dotenv(key)
 
     anthropic_oauth_env = _env_val("ANTHROPIC_TOKEN") or _env_val("CLAUDE_CODE_OAUTH_TOKEN")
     if _env_val("ANTHROPIC_API_KEY") and not anthropic_oauth_env:
@@ -2410,6 +2436,7 @@ def _seed_anthropic_singletons(seed: _Seeder) -> None:
                 "refresh_token": creds.get("refreshToken"),
                 "expires_at_ms": creds.get("expiresAt"),
                 "label": label_from_token(creds.get("accessToken", ""), source_name),
+                "provenance": creds.get("provenance"),
             })
 
 
@@ -2444,10 +2471,12 @@ def _seed_nous_singleton(seed: _Seeder, auth_store: Dict[str, Any]) -> None:
         **{key: state.get(key) for key in _NOUS_EXTRA_STATE_KEYS},
         "tls": state.get("tls") if isinstance(state.get("tls"), dict) else None,
         "label": custom_label or label_from_token(state.get("access_token", ""), "device_code"),
+        "provenance": state.get("provenance"),
     })
 
 
 def _seed_copilot_singleton(seed: _Seeder) -> None:
+    from hermes_cli.provider_policy import get_provider_auth_policy
     # Copilot tokens are resolved dynamically via `gh auth token` or env vars
     # (COPILOT_GITHUB_TOKEN / GH_TOKEN); they don't live in the auth store.
     try:
@@ -2489,6 +2518,8 @@ def _seed_copilot_singleton(seed: _Seeder) -> None:
             "access_token": api_token,
             "base_url": enterprise_base_url or (pconfig.inference_base_url if pconfig else ""),
             "label": source,
+            **({"provenance": get_provider_auth_policy().local_provenance("config" if source == "config" else "local_env")}
+               if get_provider_auth_policy().config_only else {}),
         })
     except Exception as exc:
         logger.debug("Copilot token seed failed: %s", exc)
@@ -2536,6 +2567,7 @@ def _seed_minimax_singleton(seed: _Seeder) -> None:
             "expires_at_ms": expires_at_ms,
             "base_url": str(state.get("inference_base_url", "") or "").rstrip("/"),
             "label": state.get("label", "") or label_from_token(state.get("access_token", ""), "oauth"),
+            "provenance": state.get("provenance"),
         })
     except Exception as exc:
         logger.debug("MiniMax OAuth token seed failed: %s", exc)
@@ -2566,6 +2598,7 @@ def _seed_tokens_singleton(seed: _Seeder, auth_store: Dict[str, Any]) -> None:
         "base_url": base_url,
         "last_refresh": state.get("last_refresh"),
         "label": custom_label or label_from_token(tokens.get("access_token", ""), "device_code"),
+        "provenance": state.get("provenance"),
     })
 
 
@@ -2601,6 +2634,10 @@ def get_env_prefer_dotenv(key: str) -> str:
     value from the active secret scope (set by apply_onepassword_secrets());
     otherwise every provider auth attempt would receive a URL instead of a key.
     """
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        return policy.env_value(key).strip()
     env_file = load_env()
     raw = env_file.get(key, "").strip()
     scoped_value = (_get_secret(key, "") or "").strip()
@@ -2643,6 +2680,11 @@ def _env_payload(*, env_var: str, token: str, base_url: str) -> Dict[str, Any]:
         "base_url": base_url,
         "label": env_var,
     }
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        payload["provenance"] = policy.local_provenance("local_env")
+        return payload
     try:
         from hermes_cli.env_loader import get_secret_source
         source_label = get_secret_source(env_var)
@@ -2780,6 +2822,11 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
 
 def load_pool(provider: str) -> CredentialPool:
     provider = (provider or "").strip().lower()
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    from agent.credential_pool_policy import load_config_only_pool
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        return load_config_only_pool(provider, policy)
     if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS:
         # One-time heal for installs that forked this grant across profiles
         # before the clone-strip / root write-through existed (#100339).

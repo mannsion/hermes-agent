@@ -217,6 +217,8 @@ def _minimax_oauth_login(*, region: str = "global", open_browser: bool = True, t
         **_minimax_expiry_fields(token_data["expired_in"]),
     }
 
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    auth_state["provenance"] = get_provider_auth_policy().local_provenance()
     _minimax_save_auth_state(auth_state)
     print("\u2713 MiniMax OAuth login successful.")
     if msg := token_data.get("notification_message"):

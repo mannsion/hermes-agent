@@ -249,6 +249,9 @@ def heal_forked_single_use_oauth_grants(provider_id: str) -> Optional[Dict[str, 
     ``{"adopted", "stripped_ids", "files", "providers_block"}`` when something healed, else None.
     Never raises.
     """
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        return None
     if provider_id not in SINGLE_USE_REFRESH_POOL_PROVIDERS:
         return None
     try:

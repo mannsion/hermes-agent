@@ -1678,6 +1678,16 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # that specific path; this copy locks the contract so future transport/keepalive work can't reintroduce
     # the same class of bug.
     client_kwargs = dict(client_kwargs)
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = getattr(agent, "_provider_auth_policy", None) or get_provider_auth_policy()
+    if policy.config_only:
+        from agent.provider_client_policy import configured_client_kwargs
+        selected = getattr(agent, "requested_provider", None) or getattr(agent, "provider", None)
+        if selected == "custom":
+            selected = None  # Resolve the named identity from its configured endpoint.
+        client_kwargs = configured_client_kwargs(
+            policy, client_kwargs, provider=selected, model=getattr(agent, "model", None),
+        )
     # The MoA virtual provider has no OpenAI wire endpoint; the facade *is* the client. Rebuild the
     # facade, never a native client (TypeError; relay re-wire).
     # Rebuilding a native OpenAI client while agent.provider == "moa" (client replacement, stream-retry pool
@@ -1698,7 +1708,7 @@ def create_openai_client(agent, client_kwargs: dict, *, reason: str, shared: boo
     # before the built-in ladder so a profile registered from ~/.hermes/plugins/ or a pip entry
     # point can ship a transport without editing this function (what makes an out-of-tree ACP
     # provider possible). None (the default) falls through, so existing providers are unaffected.
-    provider_client = _provider_supplied_client(agent, client_kwargs)
+    provider_client = None if policy.config_only else _provider_supplied_client(agent, client_kwargs)
     if provider_client is not None:
         _ra().logger.info(
             "%s client created from provider profile (%s, shared=%s) %s",

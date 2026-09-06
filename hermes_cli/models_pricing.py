@@ -213,7 +213,15 @@ def fetch_models_with_pricing(
     ``pricing.original`` rates through as a nested ``original`` dict for sale chrome."""
     from hermes_cli.models import _HERMES_USER_AGENT
     url_root = (base_url or "").rstrip("/")
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        from hermes_cli.models_policy import require_configured_endpoint
+        api_key = require_configured_endpoint(url_root + "/v1")["api_key"]
     cache_key = url_root + _pricing_auth_fingerprint(api_key)
+    if policy.config_only:
+        cache_key = str(policy.cache_key) + ":" + cache_key
+
     if not force_refresh:
         cached = _cached_catalog(cache_key)
         if cached is not None:
@@ -273,6 +281,10 @@ def fetch_ai_gateway_pricing(timeout: float = 8.0, *, force_refresh: bool = Fals
 
 def _resolve_openrouter_api_key() -> str:
     """Best-effort OpenRouter API key for pricing fetch."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        from hermes_cli.models_policy import configured_runtime
+        return configured_runtime("openrouter")["api_key"]
     return os.getenv("OPENROUTER_API_KEY", "").strip()
 
 
@@ -284,6 +296,11 @@ def _resolve_nous_pricing_credentials() -> tuple[str, str]:
     Precedence mirrors runtime credential resolution: ``NOUS_INFERENCE_BASE_URL`` (staging /
     preview) → resolved credential ``base_url`` → production default. Without the override a
     staging profile's sale ``pricing.original`` would never reach the pickers."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        from hermes_cli.models_policy import configured_runtime
+        runtime = configured_runtime("nous")
+        return runtime["api_key"], runtime["base_url"].rstrip("/").removesuffix("/v1")
     try:
         from hermes_cli.auth import _nous_inference_env_override
 
@@ -490,6 +507,10 @@ def get_pricing_for_provider(
     prewarm fills the same caches for later opens."""
     from hermes_cli.models import normalize_provider
     normalized = normalize_provider(provider)
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only and not policy.permits_provider(normalized):
+        return {}
     if cached_only:
         return _cached_only_pricing(normalized)
     fetcher = _PRICING_FETCHERS.get(normalized)
@@ -530,18 +551,25 @@ def _fetch_novita_pricing(timeout: float = 8.0, *, force_refresh: bool = False) 
     """NovitaAI /v1/models pricing (per-million prices in units of 0.0001 USD → per-token strings),
     cached on the resolved base URL so menu renders don't re-hit the network."""
     from hermes_cli.models import _HERMES_USER_AGENT
-    api_key = os.getenv("NOVITA_API_KEY", "").strip()
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        from hermes_cli.models_policy import configured_runtime
+        runtime = configured_runtime("novita")
+        api_key, catalog_url = runtime["api_key"], runtime["base_url"].rstrip("/")
+    else:
+        api_key = os.getenv("NOVITA_API_KEY", "").strip()
+        catalog_url = (os.getenv("NOVITA_BASE_URL", "").strip() or "https://api.novita.ai/openai/v1").rstrip("/")
     if not api_key:
         return {}
-
-    cache_key = (os.getenv("NOVITA_BASE_URL", "").strip() or "https://api.novita.ai/openai/v1").rstrip("/")
+    cache_key = str(policy.cache_key) + ":" + catalog_url if policy.config_only else catalog_url
     if not force_refresh:
         cached = _cached_catalog(cache_key)
         if cached is not None:
             return cached
 
     headers = {"Authorization": f"Bearer {api_key}", "Accept": "application/json", "User-Agent": _HERMES_USER_AGENT}
-    payload = _get_json(cache_key + "/models", headers, timeout)
+    payload = _get_json(catalog_url + "/models", headers, timeout)
     if payload is None:
         return _cache_catalog(cache_key, {})
 

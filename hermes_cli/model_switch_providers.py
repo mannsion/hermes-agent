@@ -1033,6 +1033,14 @@ def list_authenticated_providers(
     ``refresh`` busts the model-id disk cache up front (explicit user action only);
     ``probe_custom_providers`` enables live ``/models`` discovery for saved custom endpoints (CLI
     true, GUI false); ``probe_current_custom_provider`` probes only the selected custom endpoint."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        from hermes_cli.models_policy import configured_provider_rows
+        return configured_provider_rows(
+            current_provider=current_provider, current_model=current_model, current_base_url=current_base_url,
+            max_models=max_models, refresh=refresh, probe_custom_providers=probe_custom_providers,
+            probe_current_custom_provider=probe_current_custom_provider, excluded_providers=excluded_providers,
+        )
     from agent.models_dev import fetch_models_dev
     from hermes_cli.config import coerce_provider_id, stringify_provider_map
 

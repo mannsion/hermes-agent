@@ -385,6 +385,7 @@ def _publish_runtime_main(agent: Any) -> None:
                 "requested_provider", "base_url", "api_key", "api_mode", "auth_mode", "session_id"
             )},
             cache_scope=_cache_scope,
+            provider_auth_policy=getattr(agent, "_provider_auth_policy", None),
         )
 
 

@@ -347,6 +347,10 @@ def _new_sdk_client(sdk, kwargs: Dict[str, Any], headers: Dict[str, str]):
     ``api_key`` unset, so the SDK fills it from ANTHROPIC_API_KEY (loaded from ~/.hermes/.env) and
     sends dual auth — X-Api-Key *and* Authorization: Bearer — on every Portal/MiniMax/OAuth/Entra
     request; clear it whenever we intentionally authenticated via auth_token."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        kwargs.setdefault("api_key", "")
+        kwargs.setdefault("auth_token", "")
     if headers:
         kwargs["default_headers"] = headers
     client = sdk.Anthropic(**kwargs)
@@ -380,6 +384,16 @@ def build_anthropic_client(api_key, base_url: str = None, timeout: float = None,
     (connect stays 10s). ``drop_context_1m_beta`` strips ``context-1m-2025-08-07`` from the
     client-level beta header — the reactive OAuth retry in run_agent uses it after a subscription
     rejects it; fresh clients keep the default so 1M-capable subscriptions keep the capability."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    configured_headers = {}
+    if policy.config_only:
+        if callable(api_key):
+            policy.require_external_source("callable provider credential")
+        from agent.provider_client_policy import configured_client_kwargs
+        configured = configured_client_kwargs(policy, {"api_key": api_key, "base_url": base_url})
+        api_key, base_url = configured["api_key"], configured["base_url"]
+        configured_headers = configured["default_headers"]
     sdk = _require_sdk("the Anthropic provider")
     if callable(api_key) and not isinstance(api_key, str):
         return _build_anthropic_client_with_bearer_hook(
@@ -396,14 +410,15 @@ def build_anthropic_client(api_key, base_url: str = None, timeout: float = None,
     if style == "kimi":
         headers = {**_attribution_headers(), **headers}
     elif style == "oauth":
-        headers["user-agent"] = f"claude-code/{_get_claude_code_version()} (external, cli)"
+        version = _CLAUDE_CODE_VERSION_FALLBACK if policy.config_only else _get_claude_code_version()
+        headers["user-agent"] = f"claude-code/{version} (external, cli)"
         headers["x-app"] = "cli"
     if _is_opencode_endpoint(base_url):
         # OpenCode identifies clients by request headers (like OpenRouter). The OpenAI-wire paths
         # get these from profile.default_headers, but this route never sees the profile.
         for k, v in _attribution_headers().items():
             headers.setdefault(k, v)
-    return _new_sdk_client(sdk, kwargs, headers)
+    return _new_sdk_client(sdk, kwargs, {**headers, **configured_headers})
 
 
 def build_anthropic_bedrock_client(region: str):
@@ -411,6 +426,8 @@ def build_anthropic_bedrock_client(region: str):
     SDK's native Bedrock adapter gives full Claude feature parity (prompt caching, thinking
     budgets, adaptive thinking, fast mode) that Converse lacks. The common betas plus
     ``context-1m-2025-08-07`` are attached: without the latter Bedrock caps Opus 4.6/4.7 at 200K."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    get_provider_auth_policy().require_external_source("Anthropic Bedrock SDK credentials")
     sdk = _require_sdk("the Bedrock provider")
     if not hasattr(sdk, "AnthropicBedrock"):
         raise ImportError("anthropic.AnthropicBedrock not available. Upgrade with: pip install 'anthropic>=0.39.0'")
