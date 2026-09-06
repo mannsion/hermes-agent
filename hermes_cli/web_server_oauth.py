@@ -338,6 +338,8 @@ def _nous_plain_poller(session_id: str, sess: Dict[str, Any]) -> None:
         "expires_in": token_ttl,
     }
     with _profile_scope(_oauth_session_profile(session_id)):
+        from hermes_cli.provider_policy import get_provider_auth_policy
+        auth_state["provenance"] = get_provider_auth_policy().local_provenance()
         full_state = refresh_nous_oauth_from_state(auth_state, timeout_seconds=15.0, force_refresh=False)
         # The final cancellation check and the save share the session lock, so a cancel cannot
         # land between them.
@@ -392,6 +394,8 @@ def _minimax_poller(session_id: str, sess: Dict[str, Any]) -> None:
         "expires_in": max(0, int(expires_at_ts - now.timestamp())),
     }
     with _profile_scope(_oauth_session_profile(session_id)):
+        from hermes_cli.provider_policy import get_provider_auth_policy
+        auth_state["provenance"] = get_provider_auth_policy().local_provenance()
         _minimax_save_auth_state(auth_state)
 
 
@@ -419,9 +423,11 @@ def _xai_device_poller(session_id: str, sess: Dict[str, Any]) -> None:
         "token_type": str(token_data.get("token_type") or "Bearer").strip() or "Bearer",
     }
     with _profile_scope(_oauth_session_profile(session_id)):
+        from hermes_cli.provider_policy import get_provider_auth_policy
         # set_active=False: persist without hijacking an existing active chat provider.
         _save_xai_oauth_tokens(
             tokens, discovery=discovery, auth_mode="oauth_device_code", set_active=False,
+            provenance=get_provider_auth_policy().local_provenance(),
             last_refresh=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         )
         # Mirror `hermes auth add xai-oauth`: first credential may become active; never overwrite.

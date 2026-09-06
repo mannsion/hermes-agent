@@ -6,6 +6,8 @@ so ``hermes_cli.auth.<name>`` patches still intercept (and no import cycle).
 
 from __future__ import annotations
 
+from hermes_cli.provider_policy import get_provider_auth_policy
+
 import logging
 import hashlib
 import json
@@ -144,6 +146,9 @@ def _nous_inference_env_override() -> Optional[str]:
     profile's process-wide value (#65941).
     """
     from hermes_cli.auth import _optional_base_url
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        return _optional_base_url(policy.env_value("NOUS_INFERENCE_BASE_URL"))
     from agent.secret_scope import UnscopedSecretError, get_secret
     try:
         override = get_secret("NOUS_INFERENCE_BASE_URL")
@@ -161,7 +166,7 @@ def _nous_portal_env_override() -> Optional[str]:
     """
     from hermes_cli.auth import _optional_base_url
     return _optional_base_url(
-        os.getenv("HERMES_PORTAL_BASE_URL") or os.getenv("NOUS_PORTAL_BASE_URL"))
+        get_provider_auth_policy().env_value("HERMES_PORTAL_BASE_URL") or get_provider_auth_policy().env_value("NOUS_PORTAL_BASE_URL"))
 
 
 def _scope_values(raw_scope: Any) -> set[str]:
@@ -320,6 +325,9 @@ def _nous_shared_store_lock(timeout_seconds: float = AUTH_LOCK_TIMEOUT_SECONDS):
     Lock ordering invariant: if both this and ``_auth_store_lock`` need to be held, acquire
     ``_auth_store_lock`` FIRST. All runtime refresh paths follow this order.
     """
+    if get_provider_auth_policy().config_only:
+        yield
+        return
     from hermes_cli.auth import _file_lock
     try:
         lock_path = _nous_shared_store_path().with_suffix(".lock")
@@ -346,6 +354,8 @@ _NOUS_SHARED_STATE_KEYS = (
 
 def _merge_shared_nous_oauth_state(state: Dict[str, Any]) -> bool:
     """Copy fresher shared OAuth tokens into a profile-local Nous state."""
+    if get_provider_auth_policy().config_only:
+        return False
     from hermes_cli.auth import _nonempty_str, _parse_iso_timestamp, _read_shared_nous_state
     shared = _read_shared_nous_state() or {}
     shared_refresh = shared.get("refresh_token")
@@ -360,6 +370,7 @@ def _merge_shared_nous_oauth_state(state: Dict[str, Any]) -> bool:
         value = shared.get(key)
         if value not in {None, ""}:
             state[key] = value
+    state["provenance"] = {"source": "shared_store"}
     return True
 
 
@@ -384,6 +395,8 @@ def _write_shared_nous_state(state: Dict[str, Any]) -> None:
 
     Best-effort: failures are logged and swallowed; per-profile auth.json stays the source of truth.
     """
+    if get_provider_auth_policy().config_only:
+        return None
     from hermes_cli.auth import _nonempty_str, _write_private_file_atomic
     refresh_token = state.get("refresh_token")
     # Nothing worth sharing without refresh material: an OAuth refresh_token (with its access token),
@@ -411,6 +424,8 @@ def _read_shared_nous_state() -> Optional[Dict[str, Any]]:
 
     None (missing / unreadable / malformed / lacking tokens) means "fall through to device-code".
     """
+    if get_provider_auth_policy().config_only:
+        return None
     from hermes_cli.auth import _nonempty_str
     try:
         path = _nous_shared_store_path()
@@ -432,6 +447,8 @@ def _read_shared_nous_state() -> Optional[Dict[str, Any]]:
 
 def _clear_shared_nous_state(reason: str) -> None:
     """Remove the shared Nous OAuth store after a terminal token failure."""
+    if get_provider_auth_policy().config_only:
+        return None
     try:
         with _nous_shared_store_lock():
             _nous_shared_store_path().unlink(missing_ok=True)
@@ -522,6 +539,8 @@ def _try_import_shared_nous_state(*, timeout_seconds: float = 15.0) -> Optional[
     Returns auth_state ready for ``persist_nous_credentials()``; None on any failure (expired
     token, portal unreachable) so the caller falls through to device-code.
     """
+    if get_provider_auth_policy().config_only:
+        return None
     from hermes_cli.auth import (
         _read_shared_nous_state, _write_shared_nous_state, refresh_nous_oauth_from_state,
         _is_terminal_nous_refresh_error)
@@ -547,6 +566,7 @@ def _try_import_shared_nous_state(*, timeout_seconds: float = 15.0) -> Optional[
             _clear_shared_nous_state("shared_import_terminal_refresh_failure")
         logger.debug("Shared Nous import failed: %s", exc)
         return None
+    refreshed["provenance"] = {"source": "shared_store"}
     return refreshed
 
 
@@ -725,6 +745,7 @@ def refresh_nous_oauth_from_state(
     tls = src.get("tls") or {}
     insecure, ca_bundle = tls.get("insecure"), tls.get("ca_bundle")
     state: Dict[str, Any] = {
+        "provenance": src.get("provenance"),
         "access_token": src.get("access_token", ""), "refresh_token": src.get("refresh_token", ""),
         "client_id": src.get("client_id") or DEFAULT_NOUS_CLIENT_ID,
         "portal_base_url": (src.get("portal_base_url") or DEFAULT_NOUS_PORTAL_URL).rstrip("/"),
@@ -795,8 +816,8 @@ def _nous_effective_routing(state: Dict[str, Any]) -> tuple[str, str, str, str]:
     """
     from hermes_cli.auth import _NOUS_PORTAL_ALLOWED_HOSTS, _optional_base_url
     portal_url = (
-        _optional_base_url(state.get("portal_base_url")) or os.getenv("HERMES_PORTAL_BASE_URL")
-        or os.getenv("NOUS_PORTAL_BASE_URL") or DEFAULT_NOUS_PORTAL_URL).rstrip("/")
+        _optional_base_url(state.get("portal_base_url")) or get_provider_auth_policy().env_value("HERMES_PORTAL_BASE_URL")
+        or get_provider_auth_policy().env_value("NOUS_PORTAL_BASE_URL") or DEFAULT_NOUS_PORTAL_URL).rstrip("/")
     # A persisted/stale portal_base_url is where the refresh token gets POSTed — reject any host
     # outside the allowlist so a poisoned value can't exfiltrate the bearer, healing to the
     # default. Trusted operator env overrides bypass this network-value gate.
@@ -1271,10 +1292,10 @@ def _nous_device_code_login(
         _tls_state_from_verify, format_auth_error, refresh_nous_oauth_from_state)
     pconfig = PROVIDER_REGISTRY["nous"]
     portal_base_url = (
-        portal_base_url or os.getenv("HERMES_PORTAL_BASE_URL") or os.getenv("NOUS_PORTAL_BASE_URL")
+        portal_base_url or get_provider_auth_policy().env_value("HERMES_PORTAL_BASE_URL") or get_provider_auth_policy().env_value("NOUS_PORTAL_BASE_URL")
         or pconfig.portal_base_url).rstrip("/")
     requested_inference_url = (
-        inference_base_url or os.getenv("NOUS_INFERENCE_BASE_URL")
+        inference_base_url or get_provider_auth_policy().env_value("NOUS_INFERENCE_BASE_URL")
         or pconfig.inference_base_url).rstrip("/")
     client_id = client_id or pconfig.client_id
     scope = scope or pconfig.scope
@@ -1314,6 +1335,7 @@ def _nous_device_code_login(
     if resolved_inference_url != requested_inference_url:
         print(f"Using portal-provided inference URL: {resolved_inference_url}")
     auth_state = {
+        "provenance": get_provider_auth_policy().local_provenance("local_login"),
         "portal_base_url": portal_base_url, "inference_base_url": resolved_inference_url,
         "client_id": client_id, "scope": token_data.get("scope") or scope,
         "token_type": token_data.get("token_type", "Bearer"),
@@ -1454,6 +1476,8 @@ def _offer_shared_nous_import(timeout_seconds: float) -> Optional[Dict[str, Any]
     Checks the shared store before launching a fresh device-code flow. Returns the refreshed
     auth state when the user accepted and the import succeeded, else None.
     """
+    if get_provider_auth_policy().config_only:
+        return None
     from hermes_cli.auth import _prompt_yes_no, _read_shared_nous_state
     from hermes_cli.anon_auth import is_guest_state
     shared = _read_shared_nous_state()

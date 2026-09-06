@@ -2220,6 +2220,19 @@ def init_agent(
     """
     _install_safe_stdio()
 
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    agent._provider_auth_policy = get_provider_auth_policy()
+    if agent._provider_auth_policy.config_only:
+        # Programmatic agents obey the same native config authority as CLI agents.
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        runtime = resolve_runtime_provider(
+            requested=requested_provider or provider, target_model=model,
+        )
+        api_key, base_url = runtime.get("api_key"), runtime.get("base_url")
+        provider, api_mode = runtime.get("provider"), runtime.get("api_mode")
+        requested_provider = runtime.get("requested_provider") or agent._provider_auth_policy.default_provider
+        credential_pool = runtime.get("credential_pool")
+
     _params = locals()
     for _name in _PASSTHROUGH_PARAMS:
         setattr(agent, _name, _params[_name])

@@ -1,10 +1,10 @@
 # Config-only provider authentication
 
-Status: planned; no runtime implementation in this branch.
+Status: implemented locally; validation below.
 Repository: mannsion/hermes-agent (personal fork).
 Branch: codex/config-only-provider-mode.
 Audited base: 7166071fcaadb36df26f6d753dda97da6b5d699e.
-Publication: plan remains local. Any later PR must target mannsion/hermes-agent,
+Publication: implementation remains local. Any later PR must target mannsion/hermes-agent,
 never NousResearch/hermes-agent, unless the user explicitly changes that scope.
 
 ## Problem and required behavior
@@ -22,7 +22,7 @@ helper repository and without changing the native Hermes commands.
 
 ## Configuration contract
 
-Proposed config.yaml setting:
+Config.yaml setting:
 
 ```yaml
 provider_auth:
@@ -204,3 +204,58 @@ Do not label the feature implemented until strict-mode success and error paths
 pass end to end and the default-mode regression suite passes. This branch
 currently contains the plan only. No application restart, deployment, push, or
 pull request is part of the planning task.
+
+
+## Implemented behavior and use
+
+The fork implements the policy in `hermes_cli/provider_policy.py`. Native runtime
+resolution, SDK construction, auxiliary calls, model catalogs, and credential
+pools share that authority. Provider contexts preserve their selected home and
+mode during requests and delayed refresh work.
+
+Declare each permitted provider under `providers` (or select a built-in provider
+under `model.provider`), then set `provider_auth.mode: config_only`. Named custom
+providers continue to use `custom:NAME`. A proxy example:
+
+```yaml
+provider_auth:
+  mode: config_only
+model:
+  provider: custom:proxy
+  default: your-model-id
+providers:
+  proxy:
+    base_url: http://server:8088/llm/subscription/v1
+    api_key: no-key-required
+    api_mode: codex_responses
+    discover_models: true
+```
+
+Use an actual model ID reported by the endpoint. Model switching and explicitly
+configured fallback providers remain available. Credentials in local `.env`
+are read literally. Native login/pool records require local provenance; older
+records of unknown origin require a new local login or key entry. Refresh keeps
+that provenance and never imports another application's tokens.
+
+Adapters that require an external process or an ambient SDK credential chain
+(Bedrock, Vertex, Azure Foundry, Qwen's external OAuth, ACP, and app-server)
+reject configuration-only resolution. Use an explicitly configured HTTP provider
+for such backends. `auto` retains their existing behavior.
+
+This setting scopes inference credentials and routes. General tool credentials
+and tool execution retain their existing behavior; this is not an operating
+system or network sandbox. Restart existing Hermes sessions after changing mode.
+
+Validation uses the native per-file runner with temporary Hermes homes, fake
+credential stores, and HTTP fixtures. It covers native `AIAgent` chat and model
+selection, Responses and chat transport, auxiliary failures, configured fallback,
+cache isolation, local login/refresh, ignored ambient credentials, and default
+mode regressions. The companion helper's native integration test verifies
+transactional cleanup and preservation of unrelated data.
+
+
+Verified on this Linux checkout: 1,011 tests passed across 64 native test files;
+one Windows-only test was skipped. The root helper suite passed 121 tests,
+including native clean-reset and unavailable-proxy preservation checks. Module
+Ruff checks (including undefined-name checks) and root `uv run poe check` passed.
+No live Hermes configuration or running Compose services were changed.

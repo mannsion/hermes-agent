@@ -116,6 +116,8 @@ from agent.auxiliary_health import _custom_health_base_url, _unhealthy_cache_key
 from hermes_constants import OPENROUTER_BASE_URL, hermes_home_key
 from utils import base_url_host_matches, base_url_hostname, base_url_origin, env_float, is_truthy_value, model_forces_max_completion_tokens, normalize_proxy_env_vars
 
+from agent.auxiliary_policy import request_policy, scoped_auxiliary_call
+
 logger = logging.getLogger(__name__)
 
 
@@ -1064,6 +1066,9 @@ def _scoped_key_env(name: str) -> str:
     """
     if not name:
         return ""
+    policy = request_policy()
+    if policy.config_only:
+        return policy.env_value(name)
     with contextlib.suppress(Exception):
         from agent.secret_scope import UnscopedSecretError, get_secret
         with contextlib.suppress(UnscopedSecretError):
@@ -2577,7 +2582,7 @@ def _runtime_main_value(field: str) -> Any:
 def set_runtime_main(
     provider: str, model: str, *, requested_provider: str = "", base_url: str = "",
     api_key: Any = "", api_mode: str = "", auth_mode: str = "", session_id: str = "",
-    cache_scope: str = "",
+    cache_scope: str = "", provider_auth_policy: Any = None,
 ) -> contextvars.Token:
     """Record the current context's live main runtime for auxiliary routing.
 
@@ -2600,6 +2605,8 @@ def set_runtime_main(
         "session_id": (session_id or "").strip(),
         "cache_scope": (cache_scope or "").strip(),
     }
+    if provider_auth_policy is not None:
+        runtime["provider_auth_policy"] = provider_auth_policy
     # Publish authoritative context before updating the locked mirrors.
     token = _RUNTIME_MAIN_CONTEXT.set(runtime)
     _publish_runtime_main_mirrors(tuple(runtime[field] for field in _MAIN_RUNTIME_FIELDS))
@@ -2909,6 +2916,8 @@ def _normalize_main_runtime(main_runtime: Optional[Dict[str, Any]]) -> Dict[str,
     if not isinstance(main_runtime, dict):
         return {}
     normalized: Dict[str, Any] = {}
+    if main_runtime.get("provider_auth_policy") is not None:
+        normalized["provider_auth_policy"] = main_runtime["provider_auth_policy"]
     for field in _MAIN_RUNTIME_CONTEXT_FIELDS:
         value = main_runtime.get(field)
         if field == "api_key" and callable(value) and not isinstance(value, str):
@@ -2927,6 +2936,8 @@ def _get_provider_chain() -> List[tuple]:
 
     ``openai-codex`` is deliberately absent (shifting allow-list breaks guessed-model fallback).
     """
+    if request_policy().config_only:
+        return []
     return [
         ("openrouter", _try_openrouter), ("nous", _try_nous),
         ("local/custom", _try_custom_endpoint), ("api-key", _resolve_api_key_provider),
@@ -3544,6 +3555,14 @@ _CREDENTIAL_REFRESHERS: Dict[str, Callable[..., bool]] = {
 def _refresh_provider_credentials(provider: str, *, failed_api_key: str = "") -> bool:
     """Refresh short-lived credentials for OAuth-backed auxiliary providers."""
     normalized = _normalize_aux_provider(provider)
+    if request_policy().config_only:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        try:
+            runtime = resolve_runtime_provider(requested=normalized, force_refresh=True)
+        except (ValueError, RuntimeError):
+            return False
+        _evict_cached_clients(normalized)
+        return bool(runtime.get("api_key"))
     refresher = _CREDENTIAL_REFRESHERS.get(normalized)
     if refresher is None:
         return False
@@ -4335,6 +4354,14 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     # ACP shims (subprocess, not an HTTP pool) are already async-safe and opt out of the wrapper.
     if _client_declares(sync_client, "HERMES_SKIP_ASYNC_WRAP"):
         return sync_client, model
+    if request_policy().config_only:
+        base_url = str(sync_client.base_url)
+        client = AsyncOpenAI(
+            api_key=sync_client.api_key, base_url=base_url, organization="", project="",
+            default_headers=dict(getattr(sync_client, "_custom_headers", {})), max_retries=0,
+            **_openai_http_client_kwargs(base_url, async_mode=True),
+        )
+        return client, model
     sync_base_url = str(sync_client.base_url)
     async_kwargs = {"api_key": sync_client.api_key, "base_url": sync_base_url}
     if base_url_host_matches(sync_base_url, "openrouter.ai"):
@@ -4955,6 +4982,7 @@ _EXPLICIT_PROVIDER_BRANCHES: Dict[str, Callable[[_ResolveRequest], _ResolveResul
 }
 
 
+@scoped_auxiliary_call
 def resolve_provider_client(
     provider: str, model: str = None, async_mode: bool = False, raw_codex: bool = False,
     explicit_base_url: str = None, explicit_api_key: str = None, api_mode: str = None,
@@ -4967,6 +4995,12 @@ def resolve_provider_client(
     (full auto-detection chain). ``model=None`` → provider's default aux model. ``raw_codex`` → bare OpenAI
     client for ``responses.stream()`` callers. ``api_mode`` forces "codex_responses"/"chat_completions"/
     "anthropic_messages" instead of auto-detect. Returns (client, resolved_model) or (None, None)."""
+    if request_policy(main_runtime).config_only:
+        from agent.auxiliary_policy import resolve_configured_client
+        return resolve_configured_client(_ResolveRequest(
+            provider, (provider or "auto").strip().lower(), model, async_mode, raw_codex,
+            explicit_base_url, explicit_api_key, api_mode, main_runtime, is_vision, task,
+        ))
     _validate_proxy_env_urls()
     # Keep the pre-alias name so a custom_providers entry named like a built-in alias
     # (e.g. "kimi" → "kimi-coding") is still reachable via the named-custom branch.
@@ -5097,6 +5131,17 @@ def get_available_vision_backends() -> List[str]:
 
     Single source of truth for setup, tool gating, and runtime auto-routing.
     """
+    policy = request_policy()
+    if policy.config_only:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        available = []
+        for provider in policy.providers:
+            try:
+                resolve_runtime_provider(requested=provider)
+            except (ValueError, RuntimeError):
+                continue
+            available.append(provider)
+        return available
     available: List[str] = []
     main_provider = _read_main_provider()
     if main_provider and main_provider not in {"auto", ""}:
@@ -5208,6 +5253,7 @@ def _vision_auto_route(
 _ZAI_OPENAI_VISION_URLS = ("https://open.bigmodel.cn/api/paas/v4", "https://api.z.ai/api/paas/v4")
 
 
+@scoped_auxiliary_call
 def resolve_vision_provider_client(
     provider: Optional[str] = None, model: Optional[str] = None, *, base_url: Optional[str] = None,
     api_key: Optional[str] = None, async_mode: bool = False,
@@ -5223,6 +5269,13 @@ def resolve_vision_provider_client(
         "vision", provider, model, base_url, api_key
     )
     requested = _normalize_vision_provider(requested)
+    if request_policy(main_runtime).config_only:
+        client, final_model = resolve_provider_client(
+            requested, model=resolved_model, async_mode=async_mode,
+            explicit_base_url=resolved_base_url, explicit_api_key=resolved_api_key,
+            api_mode=resolved_api_mode, main_runtime=runtime, is_vision=True, task="vision",
+        )
+        return client._hermes_aux_effective_provider, client, final_model
     if resolved_base_url:
         provider_for_base_override = requested if requested and requested not in {"", "auto"} else "custom"
         client, final_model = resolve_provider_client(
@@ -5327,7 +5380,14 @@ def _client_cache_key(
     api_key_key = _runtime_cache_discriminator("api_key", api_key or "")
     # Profile home leads the key: callers that omit api_key (pool / Nous auth.json paths) would
     # otherwise share one client across multiplex profiles holding different credentials.
-    return (hermes_home_key(), provider, async_mode, base_url or "", api_key_key, api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key)
+    policy = request_policy(main_runtime)
+    auth_identity = ()
+    if policy.config_only:
+        from agent.auxiliary_policy import credential_store_identity
+        auth_identity = credential_store_identity(policy)
+    return (hermes_home_key(), provider, async_mode, base_url or "", api_key_key,
+            api_mode or "", runtime_key, is_vision, task_key, pool_hint, model_key,
+            policy.cache_key, auth_identity)
 
 
 def _current_event_loop() -> Any:
@@ -7191,6 +7251,7 @@ def _stamp_latency_once(latency_info: Optional[Dict[str, int]], key: str, starte
 
 
 @_relay_auxiliary_call
+@scoped_auxiliary_call
 def call_llm(
     task: str = None, *, provider: str = None, model: str = None, base_url: str = None,
     api_key: str = None, main_runtime: Optional[Dict[str, Any]] = None, messages: list,
@@ -7491,6 +7552,7 @@ def extract_content_or_reasoning(response, *, max_reasoning_chars: int | None = 
 
 
 @_relay_auxiliary_call_async
+@scoped_auxiliary_call
 async def async_call_llm(
     task: str = None, *, provider: str = None, model: str = None, base_url: str = None,
     api_key: str = None, main_runtime: Optional[Dict[str, Any]] = None, messages: list,

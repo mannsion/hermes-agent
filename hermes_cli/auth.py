@@ -298,6 +298,13 @@ def get_anthropic_key() -> str:
     Checks both the ``.env`` file and the process environment, preferring ``~/.hermes/.env`` so a deliberate
     key rotation isn't shadowed by a stale shell export (matches the api-key resolution path — see #20591).
     """
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        if not policy.permits_provider("anthropic"):
+            return ""
+        from hermes_cli.runtime_provider_policy import _configured_key
+        return _configured_key(policy, policy.provider_config("anthropic"), "anthropic")[0]
     from hermes_cli.config import get_env_value_prefer_dotenv
     env_vars = PROVIDER_REGISTRY["anthropic"].api_key_env_vars
     return next((v for v in (get_env_value_prefer_dotenv(var) or "" for var in env_vars) if v), "")
@@ -366,6 +373,15 @@ def _model_level_key_env(provider_id: str) -> str:
 
 def _resolve_api_key_provider_secret(provider_id: str, pconfig: ProviderConfig) -> tuple[str, str]:
     """Resolve an API-key provider's token and indicate where it came from."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        policy.require_provider(provider_id)
+        if provider_id != "copilot":
+            from hermes_cli.runtime_provider_policy import _configured_key
+            key, source = _configured_key(policy, policy.provider_config(provider_id), provider_id)
+            if key:
+                return key, source
     if provider_id == "copilot":
         # The dedicated copilot auth module does proper token validation/exchange.
         try:
@@ -383,18 +399,18 @@ def _resolve_api_key_provider_secret(provider_id: str, pconfig: ProviderConfig) 
     # Prefer ~/.hermes/.env over os.environ so a deliberate key rotation in .env isn't shadowed by
     # a stale shell export inherited from a parent process (Codex CLI, test runners, etc.).
     from hermes_cli.config import get_env_value_prefer_dotenv
-
     # Desktop-saved credential pointer: the settings UI persists registry-provider keys as
     # model.key_env → $HERMES_HOME/.env (e.g. HERMES_CUSTOM_LMSTUDIO_API_KEY) while keeping
     # model.provider on the registry id, so the pointer must be honored here or the UI-saved
     # key is silently ignored and lmstudio falls through to its no-auth placeholder (#106336).
-    key_env = _model_level_key_env(provider_id)
-    if key_env:
-        val = _usable_declared_secret(provider_id, get_env_value_prefer_dotenv(key_env), key_env)
-        if val:
-            return val, key_env
+    if not policy.config_only:
+        key_env = _model_level_key_env(provider_id)
+        if key_env:
+            val = _usable_declared_secret(provider_id, get_env_value_prefer_dotenv(key_env), key_env)
+            if val:
+                return val, key_env
 
-    for env_var in pconfig.api_key_env_vars:
+    for env_var in (() if policy.config_only else pconfig.api_key_env_vars):
         val = _usable_declared_secret(provider_id, get_env_value_prefer_dotenv(env_var), env_var)
         if val:
             # A provably malformed key (declared prefix mismatch) must not shadow a valid credential-pool
@@ -470,6 +486,10 @@ def _nonempty_str(value: Any) -> bool:
 
 def _auth_file_path() -> Path:
     path = get_hermes_home() / "auth.json"
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        path = policy.local_path(policy.home / "auth.json")
     # Seat belt: under pytest, refuse to touch the real user's auth store (tests that forgot to
     # monkeypatch HERMES_HOME or escaped the hermetic conftest). In production: one dict lookup.
     if (os.environ.get("PYTEST_CURRENT_TEST")
@@ -485,6 +505,9 @@ def _global_auth_file_path() -> Optional[Path]:
     """Global-root auth.json in profile mode; None when profile and global root are the same dir.
 
     Read-only fallback path, so no pytest seat belt here (it lives on ``_auth_file_path()``)."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        return None
     try:
         from hermes_constants import get_default_hermes_root
         global_root = get_default_hermes_root()
@@ -650,6 +673,10 @@ def _empty_auth_store() -> Dict[str, Any]:
 
 def _load_auth_store(auth_file: Optional[Path] = None) -> Dict[str, Any]:
     auth_file = auth_file or _auth_file_path()
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        auth_file = policy.local_path(auth_file)
     if not auth_file.exists():
         return _empty_auth_store()
     try:
@@ -771,7 +798,13 @@ def _load_provider_state_with_source(
 
     Refresh paths that rotate single-use OAuth refresh tokens must write the updated chain back to
     the same store they read."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
     state = _provider_state_in(auth_store, provider_id)
+    if policy.config_only:
+        if not policy.permits_provider(provider_id) or state is None or not policy.allows_record(state):
+            return None, None
+        return state, _auth_file_path()
     if state is not None:
         return state, _auth_file_path()
     global_state = _provider_state_in(_load_global_auth_store(), provider_id)
@@ -891,6 +924,15 @@ def read_credential_pool(provider_id: Optional[str] = None) -> Dict[str, Any]:
     when the profile has zero entries for it (``hermes auth add`` in the profile shadows global)."""
     pool = _load_auth_store().get("credential_pool")
     pool = pool if isinstance(pool, dict) else {}
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        permitted = {
+            name: [entry for entry in entries if isinstance(entry, dict) and policy.allows_record(entry)]
+            for name, entries in pool.items()
+            if isinstance(entries, list) and policy.permits_provider(name)
+        }
+        return permitted if provider_id is None else permitted.get(provider_id, [])
     global_pool = _load_global_auth_store().get("credential_pool")
     global_pool = global_pool if isinstance(global_pool, dict) else {}
 
@@ -1072,7 +1114,11 @@ def nous_token_has_billing_scope() -> bool:
 
 
 def get_active_provider() -> Optional[str]:
-    """Return the currently active provider ID from auth store."""
+    """Return the configured provider in strict mode, otherwise the auth-store selection."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        return policy.default_provider or None
     return _load_auth_store().get("active_provider")
 
 
@@ -1191,6 +1237,10 @@ def is_provider_explicitly_configured(provider_id: str) -> bool:
     config.yaml ``model.provider`` / MoA slots, a pasted provider env var, a pool entry from a
     Hermes-initiated flow, or Hermes-scoped routing config for keyless cloud-SDK providers. Ambient
     borrowed credentials (gh CLI, qwen-cli, ~/.claude/.credentials.json) never count."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        return policy.permits_provider(provider_id)
     normalized = (provider_id or "").strip().lower()
     for check, best_effort in _EXPLICIT_CONFIG_CHECKS:
         try:
@@ -1453,6 +1503,13 @@ def resolve_provider(
     1. 3. 4. 5. Provider-specific API keys (GLM, Kimi, MiniMax, ...) -> that provider 7. 8. Error (no
     provider configured) See #29285.
     """
+    from hermes_cli.provider_policy import get_provider_auth_policy, _canonical_provider
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        selected = str(requested or "").strip().lower()
+        selected = policy.default_provider if selected in {"", "auto"} else _canonical_provider(selected)
+        policy.require_provider(selected)
+        return selected
     normalized = (requested or "auto").strip().lower()
     normalized = _plugin_aliases().get(normalized, normalized)
 
@@ -1838,6 +1895,8 @@ def get_xai_oauth_auth_status() -> Dict[str, Any]:
 
 
 def _provider_env_base_url(pconfig: ProviderConfig) -> str:
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
     if pconfig.id == "actual":
         from hermes_cli.providers import normalize_provider
 
@@ -1846,6 +1905,8 @@ def _provider_env_base_url(pconfig: ProviderConfig) -> str:
             configured_url = str(model.get("base_url") or "").strip()
             if configured_url:
                 return configured_url
+    if policy.config_only:
+        return policy.env_value(pconfig.base_url_env_var).strip() if pconfig.base_url_env_var else ""
     return os.getenv(pconfig.base_url_env_var, "").strip() if pconfig.base_url_env_var else ""
 
 
@@ -1956,6 +2017,10 @@ def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
 
     ``configured``/``logged_in`` are structural (executable resolves or TCP endpoint set): the
     subprocess owns real auth. ``auth_verified``/``auth_source`` carry positive evidence only."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        return {"configured": False, "logged_in": False, "provider": provider_id,
+                "error": "External-process credential resolution is disabled in config_only mode"}
     pconfig = PROVIDER_REGISTRY.get(provider_id)
     if not pconfig or pconfig.auth_type != "external_process":
         return {"configured": False}
@@ -1970,6 +2035,10 @@ def get_external_process_provider_status(provider_id: str) -> Dict[str, Any]:
 
 def _get_aws_sdk_auth_status(target: str) -> Dict[str, Any]:
     """AWS SDK providers (Bedrock) — check via boto3 credential chain."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        return {"logged_in": False, "provider": target,
+                "error": "Ambient SDK credential discovery is disabled in config_only mode"}
     try:
         from agent.bedrock_adapter import has_aws_credentials
         return {"logged_in": has_aws_credentials(), "provider": target}
@@ -1983,6 +2052,14 @@ def get_auth_status(provider_id: Optional[str] = None) -> Dict[str, Any]:
     external-process ACP backend) gets a real status. Builders are looked up by NAME at call time so
     tests that patch ``hermes_cli.auth.get_*_auth_status`` still apply."""
     target = (provider_id or get_active_provider() or "").strip().lower()
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only and target != "spotify":
+        if not policy.permits_provider(target):
+            return {"logged_in": False, "configured": False, "provider": target}
+        if target in {"bedrock", "vertex", "azure-foundry"}:
+            return {"logged_in": False, "configured": False, "provider": target,
+                    "error": "This adapter cannot enforce config_only provider credentials"}
     if not target:
         return {"logged_in": False}
     status_fn_name = _BESPOKE_STATUS_FUNCTIONS.get(target)
@@ -2102,6 +2179,12 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
         key_source = key_source or "default"
 
     env_url = _provider_env_base_url(pconfig)
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        entry = policy.provider_config(provider_id)
+        from hermes_cli.runtime_provider_policy import _literal
+        env_url = _literal(entry.get("base_url"), "Provider base_url") or env_url
     resolve_url = _API_KEY_BASE_URL_RESOLVERS.get(provider_id, _default_api_key_base_url)
     base_url = resolve_url(api_key, pconfig.inference_base_url, env_url)
     # An API-key provider must never hand back an empty base URL (a set-but-empty
@@ -2119,6 +2202,8 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
 
 def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str, Any]:
     """Resolve runtime details for local subprocess-backed providers."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    get_provider_auth_policy().require_external_source("external-process model provider")
     pconfig = PROVIDER_REGISTRY.get(provider_id)
     if not pconfig or pconfig.auth_type != "external_process":
         raise AuthError(

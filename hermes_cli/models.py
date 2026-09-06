@@ -279,7 +279,9 @@ def _pricing_profile_key() -> str:
     """Stable profile identity for process-local pricing caches."""
     from hermes_constants import hermes_home_key
 
-    return hermes_home_key()
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    return str(policy.cache_key) if policy.config_only else hermes_home_key()
 
 
 def get_cached_nous_free_tier() -> Optional[bool]:
@@ -709,6 +711,12 @@ def _provider_has_credentials(pid: str) -> bool:
 def list_available_providers() -> list[dict[str, str]]:
     """``{id, label, aliases, authenticated}`` for every provider usable with ``provider:model``,
     derived from :data:`CANONICAL_PROVIDERS` (shared with ``hermes model`` and ``/model``)."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        from hermes_cli.models_policy import configured_provider_rows
+        return [{"id": row["slug"], "label": row["name"], "aliases": [],
+                 "authenticated": row["authenticated"]}
+                for row in configured_provider_rows(probe_custom_providers=False)]
     aliases_for: dict[str, list[str]] = {}
     for alias, canonical in _PROVIDER_ALIASES.items():
         aliases_for.setdefault(canonical, []).append(alias)
@@ -1150,6 +1158,10 @@ def _resolve_copilot_catalog_api_key() -> str:
     ``resolve_api_key_provider_credentials``, then ``auth.json`` ``credential_pool.copilot[]``, then
     ``~/.copilot/config.json`` ``copilotTokens`` (the ACP CLI's own store). Without the latter two,
     keyless users see the picker fall back to the stale curated list on a silent 401."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        from hermes_cli.models_policy import configured_runtime
+        return configured_runtime("copilot")["api_key"]
     def _pool_token() -> str:
         from hermes_cli.auth import read_credential_pool
 
@@ -1409,6 +1421,10 @@ def _profile_live_catalog(normalized: str) -> Optional[list[str]]:
 def provider_model_ids(provider: Optional[str], *, force_refresh: bool = False) -> list[str]:
     """Best known model catalog for a provider: per-provider live fetchers, then the generic profile
     fetch, then the static list (merged with models.dev for ``_MODELS_DEV_PREFERRED`` providers)."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        from hermes_cli.models_policy import configured_model_ids
+        return configured_model_ids(provider, force_refresh=force_refresh)
     requested = str(provider or "").strip().lower()
     if requested == "ollama":
         return _ollama_local_catalog(force_refresh)
@@ -1501,12 +1517,17 @@ def _spawn_swr_refresh(cache_key: str, refresh_fn=None) -> None:
             with _swr_refresh_lock:
                 _swr_refresh_inflight.discard(cache_key)
 
-    threading.Thread(target=_refresh, daemon=True, name=f"model-cache-swr-{cache_key}").start()
+    from contextvars import copy_context
+    context = copy_context()
+    threading.Thread(target=context.run, args=(_refresh,), daemon=True, name=f"model-cache-swr-{cache_key}").start()
 
 
 def _provider_models_cache_path() -> Path:
     from hermes_constants import get_hermes_home
-    return get_hermes_home() / "provider_models_cache.json"
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    home = policy.home if policy.config_only else get_hermes_home()
+    return home / "provider_models_cache.json"
 
 
 def _credential_fingerprint(provider: str) -> str:
@@ -1514,6 +1535,12 @@ def _credential_fingerprint(provider: str) -> str:
     base-url env vars from ``PROVIDER_REGISTRY`` plus the mtimes of ``auth.json`` and external
     credential files (OAuth re-auth busts the cache without parsing every file shape)."""
     import hashlib
+
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        policy.require_provider(provider)
+        return hashlib.blake2b(repr(policy.cache_key).encode(), digest_size=8).hexdigest()
 
     # Keyless providers serve the catalog anonymously: nothing the user rotates should invalidate
     # the entry, so a stable fingerprint keeps the SWR cache alive and busts only on TTL expiry.
@@ -1642,6 +1669,10 @@ def cached_provider_model_ids(
     ttl_seconds: int = _PROVIDER_MODELS_CACHE_TTL) -> list[str]:
     """Disk-cached :func:`provider_model_ids`: fresh cache hit, else live fetch persisting a non-empty
     result. Always returns a list."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        from hermes_cli.models_policy import configured_model_ids
+        return configured_model_ids(provider, force_refresh=force_refresh)
     normalized = _normalized_cache_slug(provider)
     if not normalized:
         return []
@@ -1855,10 +1886,17 @@ def fetch_github_model_catalog(
     """Fetch the live GitHub Copilot model catalog for this account."""
     global _github_model_catalog_cache, _github_model_catalog_cache_key
     global _github_model_catalog_cache_time
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    identity = api_key
+    if policy.config_only:
+        from hermes_cli.models_policy import configured_runtime
+        api_key = configured_runtime("copilot")["api_key"]
+        identity = str(policy.cache_key) + ":" + api_key
 
     if (
         _github_model_catalog_cache is not None
-        and _github_model_catalog_cache_key == api_key
+        and _github_model_catalog_cache_key == identity
         and (time.monotonic() - _github_model_catalog_cache_time) < _GITHUB_MODEL_CATALOG_CACHE_TTL
     ):
         return copy.deepcopy(_github_model_catalog_cache)  # deep: callers must not mutate cached dicts
@@ -1866,7 +1904,8 @@ def fetch_github_model_catalog(
     attempts: list[dict[str, str]] = []
     if api_key:
         attempts.append({**copilot_default_headers(), "Authorization": f"Bearer {api_key}"})
-    attempts.append(copilot_default_headers())
+    if not policy.config_only:
+        attempts.append(copilot_default_headers())
 
     for headers in attempts:
         try:
@@ -1882,7 +1921,7 @@ def fetch_github_model_catalog(
             models = _copilot_text_models(items, ignore_picker_flag=True)
         if models:
             _github_model_catalog_cache = copy.deepcopy(models)
-            _github_model_catalog_cache_key = api_key
+            _github_model_catalog_cache_key = identity
             _github_model_catalog_cache_time = time.monotonic()
             return models
     return None
@@ -1901,6 +1940,14 @@ def get_copilot_model_context(model_id: str, api_key: Optional[str] = None) -> O
     miss on a fresh cache does not re-fetch), or None."""
     global _copilot_context_cache, _copilot_context_cache_time
 
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        catalog = fetch_github_model_catalog(api_key=api_key)
+        for item in catalog or []:
+            if item.get("id") == model_id:
+                value = ((item.get("capabilities") or {}).get("limits") or {}).get("max_prompt_tokens")
+                return value if isinstance(value, int) and value > 0 else None
+        return None
     if _copilot_context_cache and (time.time() - _copilot_context_cache_time < _COPILOT_CONTEXT_CACHE_TTL):
         return _copilot_context_cache.get(model_id)
 
@@ -2264,16 +2311,26 @@ def probe_api_models(
     """Probe a ``/models`` endpoint with light URL heuristics (``base`` then ``base±/v1``).
     ``anthropic_messages`` mode sends ``x-api-key`` + ``anthropic-version`` instead of a bearer; the
     ``data[].id`` response shape is identical. ``models`` is None when no candidate answered."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        from hermes_cli.models_policy import require_configured_endpoint
+        runtime = require_configured_endpoint(base_url)
+        api_key, api_mode = runtime["api_key"], runtime.get("api_mode")
+        request_headers = runtime.get("extra_headers") or runtime.get("default_headers")
+        if runtime.get("requested_provider") == "openai-codex":
+            from hermes_cli.models_policy import codex_catalog
+            return codex_catalog(runtime, timeout)
     normalized = (base_url or "").strip().rstrip("/")
     if not normalized:
         return _probe_result(None, None, "")
-    if _is_github_models_base_url(normalized):
+    if not policy.config_only and _is_github_models_base_url(normalized):
         models = _fetch_github_models(api_key=api_key, timeout=timeout)
         return _probe_result(models, COPILOT_MODELS_URL, COPILOT_BASE_URL)
 
     alternate_base = normalized[:-3].rstrip("/") if normalized.endswith("/v1") else normalized + "/v1"
     candidates: list[tuple[str, bool]] = [(normalized, False)]
-    if alternate_base and alternate_base != normalized:
+    if not policy.config_only and alternate_base and alternate_base != normalized:
         candidates.append((alternate_base, True))
 
     tried: list[str] = []
@@ -2366,7 +2423,18 @@ def _fetch_deepinfra_catalog(
     *, timeout: float = 5.0, force_refresh: bool = False) -> Optional[list[dict]]:
     """Raw DeepInfra catalog list (chat, embed, image-gen, TTS, STT in one response), cached per base
     URL. A Bearer token is attached when available so user-scoped catalogs (private fine-tunes) show."""
-    cache_key, url = _deepinfra_catalog_url()
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        from hermes_cli.models_policy import configured_runtime
+        runtime = configured_runtime("deepinfra")
+        base_url = runtime["base_url"].rstrip("/")
+        cache_key = str(policy.cache_key) + ":" + base_url
+        url = f"{base_url}/models?{_DEEPINFRA_MODELS_QUERY}"
+        api_key = runtime["api_key"]
+    else:
+        cache_key, url = _deepinfra_catalog_url()
+        api_key = os.getenv("DEEPINFRA_API_KEY", "").strip()
     if not force_refresh:
         if cache_key in _deepinfra_catalog_cache:
             return _deepinfra_catalog_cache[cache_key]
@@ -2375,7 +2443,6 @@ def _fetch_deepinfra_catalog(
             return None
 
     headers: dict[str, str] = {"User-Agent": _HERMES_USER_AGENT}
-    api_key = os.getenv("DEEPINFRA_API_KEY", "").strip()
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     try:
@@ -2441,6 +2508,10 @@ def deepinfra_base_url(section: Optional[dict] = None) -> str:
 
 def _fetch_ai_gateway_models(timeout: float = 5.0) -> Optional[list[str]]:
     """Fetch available language models with tool-use from AI Gateway."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        from hermes_cli.models_policy import configured_model_ids
+        return configured_model_ids("ai-gateway")
     api_key = os.getenv("AI_GATEWAY_API_KEY", "").strip()
     if not api_key:
         return None
@@ -2528,12 +2599,22 @@ def cached_fetch_api_models(
     # with distinct keys (#106184). A URL-only key let the last probe overwrite its siblings'
     # slot, so every other same-URL row failed the fingerprint check, got an empty catalog and
     # vanished from the no-probe pickers.
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        from hermes_cli.models_policy import require_configured_endpoint
+        runtime = require_configured_endpoint(base_url)
+        api_key, api_mode = runtime["api_key"], runtime.get("api_mode")
+        headers = runtime.get("extra_headers") or runtime.get("default_headers")
     fp = _custom_endpoint_fingerprint(api_key, api_mode, headers)
     cache_key = f"custom:{normalized_url}#{fp}"
+    if policy.config_only:
+        cache_key = f"{policy.cache_key}:{cache_key}"
     cache = _load_provider_models_cache()
     entry = cache.get(cache_key)
     now = time.time()
-    valid = not force_refresh and _cache_entry_valid(entry, fp, allow_empty=isinstance(entry, dict) and entry.get("native_catalog") is True)
+    allow_empty = policy.config_only or (isinstance(entry, dict) and entry.get("native_catalog") is True)
+    valid = not force_refresh and _cache_entry_valid(entry, fp, allow_empty=allow_empty)
 
     if valid:
         age = now - entry["at"]
@@ -2555,12 +2636,12 @@ def cached_fetch_api_models(
         return None
 
     live = _live()
-    if live or isinstance(live, _NativePickerModelList):
+    if live or isinstance(live, _NativePickerModelList) or (policy.config_only and live is not None):
         stored = _entry(live, now)
         _store_cache_entry(cache_key, stored, cache)
         return _catalog(stored)
     # Live returned nothing (offline, timeout, auth hiccup): a stale same-fingerprint entry beats it.
-    if _cache_entry_valid(entry, fp, allow_empty=isinstance(entry, dict) and entry.get("native_catalog") is True):
+    if _cache_entry_valid(entry, fp, allow_empty=allow_empty):
         return _catalog(entry)
     return live
 

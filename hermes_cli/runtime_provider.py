@@ -54,7 +54,9 @@ def normalize_extra_headers(value):
 def _getenv(name: str, default: str = "") -> str:
     """Profile-scoped ``os.getenv`` for credential/provider reads: identical to ``os.getenv`` when
     multiplexing is off; scope-aware (fail-closed on an unscoped read) when on."""
-    val = _get_secret(name, default)
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    val = policy.env_value(name, default) if policy.config_only else _get_secret(name, default)
     return val if val is not None else default
 
 
@@ -409,6 +411,11 @@ def resolve_requested_provider(requested: Optional[str] = None) -> str:
     """Provider request from explicit arg, then config, then ``HERMES_INFERENCE_PROVIDER``, else
     "auto". Config beats the env so chat uses the endpoint the user last saved, not a stale
     shell/.env override."""
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        selected = str(requested or "").strip().lower()
+        return policy.default_provider if selected in {"", "auto"} else selected
     if requested and requested.strip():
         return requested.strip().lower()
     cfg_provider = _get_model_config().get("provider")
@@ -833,7 +840,8 @@ def _opencode_free_runtime(provider, requested_provider, model_cfg, target_model
 
 
 def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
-                             explicit_base_url: Optional[str] = None, target_model: Optional[str] = None) -> Dict[str, Any]:
+                             explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
+                             force_refresh: bool = False) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution. Ladder (order is behavior — each
     rung returns or raises, else falls to the next):
       1. disabled-provider guard (``providers.<name>.enabled: false``)
@@ -847,6 +855,16 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
       8. OpenRouter / bare-custom fallback
     target_model overrides model_cfg["default"] when computing provider-specific api_mode (e.g.
     OpenCode Zen/Go where different models route through different API surfaces)."""
+    from hermes_cli.provider_policy import get_provider_auth_policy, provider_auth_scope
+    policy = get_provider_auth_policy()
+    if policy.config_only:
+        from hermes_cli.runtime_provider_policy import resolve_config_only_runtime
+        with provider_auth_scope(policy):
+            return resolve_config_only_runtime(
+                policy, requested=requested, explicit_api_key=explicit_api_key,
+                explicit_base_url=explicit_base_url, target_model=target_model,
+                force_refresh=force_refresh,
+            )
     requested_provider = resolve_requested_provider(requested)
     _raise_if_provider_disabled(requested_provider)
     return next(r for r in _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model) if r)

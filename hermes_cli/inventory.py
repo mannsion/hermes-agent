@@ -94,6 +94,12 @@ def build_models_payload(
         excluded_providers=ctx.excluded_providers or [],
     )
 
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if get_provider_auth_policy().config_only:
+        # The configured inventory is complete. Ambient local runtimes, sign-in probes,
+        # and pricing helpers must not append or authenticate another provider.
+        return {"providers": rows, "model": ctx.current_model, "provider": ctx.current_provider}
+
     # Managed local runtime: staged GGUFs are selectable like any provider's models, but
     # list_authenticated_providers can't know about them (no credential — reachability is the
     # credential), so inject the row here where every picker surface inherits it.
@@ -192,7 +198,8 @@ def build_model_options_payload(
         capabilities=True, featured=True,
         refresh=refresh, probe_custom_providers=refresh, probe_current_custom_provider=not refresh,
     )
-    if not refresh:
+    from hermes_cli.provider_policy import get_provider_auth_policy
+    if not refresh and not get_provider_auth_policy().config_only:
         _prewarm_pricing_async(payload["providers"], current_provider=ctx.current_provider,
                                current_base_url=ctx.current_base_url)
     return payload
