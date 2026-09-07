@@ -5,15 +5,14 @@ import { cn } from '@/lib/utils'
 
 /**
  * Rounded surface for fenced code (and any equivalent: diffs, raw payloads,
- * etc.) sized for the conversation column. Background only — no border, no
- * header, no language label — so a code block reads as a tinted slab of the
- * reply rather than an attached artifact.
+ * etc.) sized for the conversation column. Use the editor background and
+ * transcript border tokens so the boundary stays visible in every theme.
  */
 function CodeCard({ className, ...props }: React.ComponentProps<'div'>) {
   return (
     <div
       className={cn(
-        'group/code relative min-w-0 max-w-full overflow-hidden rounded-[0.625rem] bg-(--ui-bg-editor) [--expandable-fade-from:var(--ui-bg-editor)] text-[length:var(--conversation-tool-font-size)] text-muted-foreground',
+        'group/code relative min-w-0 max-w-full overflow-hidden rounded-[0.625rem] border border-(--ui-stroke-tertiary) bg-(--ui-bg-editor) text-[length:var(--conversation-tool-font-size)] text-muted-foreground',
         className
       )}
       data-slot="code-card"

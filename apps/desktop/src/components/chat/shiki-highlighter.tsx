@@ -19,8 +19,8 @@ export { SHIKI_COLOR_REPLACEMENTS, SHIKI_THEME } from '@/components/chat/shiki-c
  * Streamdown's code adapter renders header + body as inline siblings, so we
  * own the wrapping `<CodeCard>` here and neutralize the upstream
  * `data-streamdown="code-block"` chrome from styles.css. The card is
- * background-only — no header row, no language label — so a fence reads as a
- * tinted slab of the reply; copy is a hover-reveal control in the corner.
+ * a themed, bordered surface with no header row or language label; copy is
+ * a hover-reveal control in the corner.
  *
  * The heavy lifting lives in the lazy `shiki-block` chunk (full bundle so all
  * `bundledLanguages` work; theme switches follow the document `color-scheme`

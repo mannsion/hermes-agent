@@ -232,6 +232,8 @@ Sizes: `default`, `xs`, `overlay` (titlebar glyph counts).
   labeled controls sit below the code, leaving text selection and both
   scrollbars unobstructed. Overflow detection observes intrinsic content as
   well as the viewport so a growing stream cannot strand a clipped block.
+  `CodeCard` pairs the editor background with a 1px `--ui-stroke-tertiary`
+  border so code remains distinct from the transcript across themes.
 - A tool result may expose an inline action that opens a preview. It must not
   open the rail automatically.
 - Install, onboarding, connecting, boot failure, and reauthentication are
