@@ -227,6 +227,11 @@ Sizes: `default`, `xs`, `overlay` (titlebar glyph counts).
 - Bordered surfaces in the transcript (tables, fences, callouts, attachments)
   use `--ui-stroke-tertiary`. Not `border-border` — that's the app-wide
   default and reads too hot against the thread.
+- Code blocks grow naturally up to a 24rem preview. Expand reveals the entire
+  block and follows streamed content; Collapse restores the preview. These
+  labeled controls sit below the code, leaving text selection and both
+  scrollbars unobstructed. Overflow detection observes intrinsic content as
+  well as the viewport so a growing stream cannot strand a clipped block.
 - A tool result may expose an inline action that opens a preview. It must not
   open the rail automatically.
 - Install, onboarding, connecting, boot failure, and reauthentication are

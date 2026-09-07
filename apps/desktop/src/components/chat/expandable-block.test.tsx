@@ -1,74 +1,100 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { ExpandableBlock } from './expandable-block'
 
-// jsdom has no ResizeObserver and reports scrollHeight === 0, so the block
-// never flips to `overflowing` on its own. Stub RO to fire immediately and
-// force a tall scrollHeight on the observed node so the toggle mounts.
+// Deliver only the node whose size changed. The browser does not report a
+// capped viewport when streamed content grows inside it.
+const observed = new Map<Element, ResizeObserverCallback>()
+
 class TestResizeObserver {
   constructor(private readonly callback: ResizeObserverCallback) {}
-
   observe(target: Element) {
-    Object.defineProperty(target, 'scrollHeight', { configurable: true, value: 400 })
-    this.callback([{ target } as ResizeObserverEntry], this as unknown as ResizeObserver)
+    observed.set(target, this.callback)
   }
-
-  unobserve() {}
-  disconnect() {}
+  unobserve(target: Element) {
+    observed.delete(target)
+  }
+  disconnect() {
+    observed.clear()
+  }
 }
 
-afterEach(() => {
-  cleanup()
-  vi.unstubAllGlobals()
-})
+beforeAll(() => vi.stubGlobal('ResizeObserver', TestResizeObserver))
+afterEach(cleanup)
+
+function resize(target: Element) {
+  act(() => {
+    observed.get(target)?.([{ target } as ResizeObserverEntry], {} as ResizeObserver)
+  })
+}
+
+function dimensions(element: Element, visible: number, total: number) {
+  Object.defineProperties(element, {
+    clientHeight: { configurable: true, value: visible },
+    scrollHeight: { configurable: true, value: total }
+  })
+}
 
 describe('ExpandableBlock', () => {
-  it('lets horizontal scroll through and keeps the last line selectable', () => {
-    vi.stubGlobal('ResizeObserver', TestResizeObserver)
-
-    const { container } = render(
+  it('offers expansion when streamed content grows inside an unchanged viewport', () => {
+    const view = render(
       <ExpandableBlock>
-        <pre data-testid="content">{'const x = 1\n'.repeat(20)}</pre>
+        <pre>short code</pre>
       </ExpandableBlock>
     )
 
-    const inner = container.querySelector('[data-testid="content"]')!.parentElement!
-    const toggle = screen.getByRole('button', { name: /expand|collapse/i })
-    const fade = toggle.parentElement!
+    const viewport = view.container.querySelector('.scrollbar-overlay')!
+    dimensions(viewport, 120, 120)
+    resize(viewport)
+    expect(screen.queryByRole('button', { name: 'Expand' })).toBeNull()
 
-    // Inner container allows horizontal scroll so wide code gets a scrollbar:
-    // platform overlay (`scrollbar-overlay`), not the always-on classic gutter.
-    expect(inner.className).toContain('overflow-x-auto')
-    expect(inner.className).toContain('scrollbar-overlay')
+    view.rerender(
+      <ExpandableBlock>
+        <pre>{'const x = 1\n'.repeat(80)}</pre>
+      </ExpandableBlock>
+    )
+    dimensions(viewport, 120, 1280)
+    resize(viewport.firstElementChild!)
+    expect(screen.getByRole('button', { name: 'Expand' }).getAttribute('aria-expanded')).toBe('false')
 
-    // The full-width fade is a pure cue: it spans the bottom edge but must not
-    // intercept pointer events, so the scrollbar drag and text selection on the
-    // last line pass through to the content underneath.
-    expect(fade.className).toContain('pointer-events-none')
-    expect(fade.className).toContain('inset-x-0')
-
-    // Only the compact toggle is clickable, and it is pinned to the right edge
-    // rather than spanning the full width (the old bug).
-    expect(toggle.className).toContain('pointer-events-auto')
-    expect(toggle.className).toContain('w-9')
-    expect(toggle.className).not.toContain('inset-x-0')
+    view.rerender(
+      <ExpandableBlock>
+        <pre>short code again</pre>
+      </ExpandableBlock>
+    )
+    dimensions(viewport, 32, 32)
+    resize(viewport.firstElementChild!)
+    expect(screen.queryByRole('button', { name: 'Expand' })).toBeNull()
   })
 
-  it('still toggles expanded state when the compact control is clicked', () => {
-    vi.stubGlobal('ResizeObserver', TestResizeObserver)
-
-    render(
+  it('keeps expansion through streaming updates and leaves controls outside the scrollable code', () => {
+    const view = render(
       <ExpandableBlock>
-        <pre data-testid="content">{'line\n'.repeat(20)}</pre>
+        <pre>{'line\n'.repeat(80)}</pre>
       </ExpandableBlock>
     )
 
-    const toggle = screen.getByRole('button', { name: 'Expand' })
-    expect(toggle.getAttribute('aria-expanded')).toBe('false')
+    const viewport = view.container.querySelector('.scrollbar-overlay')!
+    dimensions(viewport, 384, 1280)
+    resize(viewport)
+    fireEvent.click(screen.getByRole('button', { name: 'Expand' }))
 
-    fireEvent.click(toggle)
+    view.rerender(
+      <ExpandableBlock>
+        <pre>{'line\n'.repeat(100)}</pre>
+      </ExpandableBlock>
+    )
+    dimensions(viewport, 1600, 1600)
+    resize(viewport.firstElementChild!)
+    const collapse = screen.getByRole('button', { name: 'Collapse' })
+    expect(collapse.getAttribute('aria-expanded')).toBe('true')
+    expect(viewport.contains(collapse)).toBe(false)
+    expect(viewport.className).toContain('overflow-x-auto')
 
-    expect(screen.getByRole('button', { name: 'Collapse' }).getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(collapse)
+    dimensions(viewport, 384, 1600)
+    resize(viewport)
+    expect(screen.getByRole('button', { name: 'Expand' }).getAttribute('aria-expanded')).toBe('false')
   })
 })

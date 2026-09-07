@@ -1,8 +1,10 @@
 'use client'
 
-import { type ReactNode, useCallback, useRef, useState } from 'react'
+import { type ReactNode, useCallback, useId, useRef, useState } from 'react'
 
+import { Button } from '@/components/ui/button'
 import { useResizeObserver } from '@/hooks/use-resize-observer'
+import { useI18n } from '@/i18n'
 import { ChevronDown } from '@/lib/icons'
 import { cn } from '@/lib/utils'
 
@@ -12,54 +14,56 @@ interface ExpandableBlockProps {
 }
 
 export function ExpandableBlock({ children, className }: ExpandableBlockProps) {
-  const innerRef = useRef<HTMLDivElement>(null)
+  const { t } = useI18n()
+  const viewportId = useId()
+  const viewportRef = useRef<HTMLDivElement>(null)
+  const contentRef = useRef<HTMLDivElement>(null)
   const [expanded, setExpanded] = useState(false)
   const [overflowing, setOverflowing] = useState(false)
 
-  // Measure inside ResizeObserver timing only (layout is clean there). A
-  // synchronous mount-time scrollHeight read forces a reflow per instance,
-  // and a tool-heavy transcript mounts dozens of these on a session switch.
+  // Read only during ResizeObserver delivery, after layout. Observe intrinsic
+  // content as well as the viewport: streamed code keeps growing even when the
+  // viewport has reached its cap and no longer emits resize notifications.
   const measure = useCallback(() => {
-    const el = innerRef.current
+    const viewport = viewportRef.current
 
-    if (el) {
-      setOverflowing(el.scrollHeight > 121)
+    if (viewport) {
+      setOverflowing(viewport.scrollHeight > viewport.clientHeight + 1)
     }
   }, [])
 
-  useResizeObserver(measure, innerRef)
+  useResizeObserver(measure, viewportRef, contentRef)
 
   return (
-    <div className="relative">
+    <div className="min-w-0">
       <div
         className={cn(
-          // `scrollbar-overlay` opts out of the app-wide classic thin gutters so
-          // this scroller keeps platform overlay bars (no always-on track).
-          'scrollbar-overlay overflow-y-auto overflow-x-auto',
-          expanded ? 'max-h-[40dvh]' : 'max-h-[7.5rem]',
+          'scrollbar-overlay overflow-x-auto overflow-y-auto',
+          expanded ? 'max-h-none' : 'max-h-96',
           className
         )}
-        ref={innerRef}
+        id={viewportId}
+        ref={viewportRef}
       >
-        {children}
+        <div className="flow-root" ref={contentRef}>
+          {children}
+        </div>
       </div>
-      {overflowing && (
-        // The fade is a pure overflow cue and must not intercept pointer events:
-        // it spans the full bottom edge (over the horizontal scrollbar of a wide
-        // code block AND the block's last line), so making it clickable killed
-        // both sideways scrolling and text selection. Keep the fade
-        // `pointer-events-none` and pin the only clickable target — a compact
-        // toggle — to the right edge, clear of the draggable scrollbar track.
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 flex h-7 justify-end bg-linear-to-t from-[var(--expandable-fade-from,var(--ui-chat-surface-background))] to-transparent">
-          <button
+      {(expanded || overflowing) && (
+        // Keep controls below the content, clear of both scrollbars and the
+        // final line. Expansion removes the cap entirely and follows streaming.
+        <div className="flex justify-end px-2 py-1">
+          <Button
+            aria-controls={viewportId}
             aria-expanded={expanded}
-            aria-label={expanded ? 'Collapse' : 'Expand'}
-            className="pointer-events-auto flex h-7 w-9 cursor-pointer items-end justify-center pb-1 text-muted-foreground/70 transition-colors hover:text-foreground"
-            onClick={() => setExpanded(v => !v)}
+            onClick={() => setExpanded(value => !value)}
+            size="micro"
             type="button"
+            variant="ghost"
           >
-            <ChevronDown className={cn('size-3.5 transition-transform', expanded && 'rotate-180')} />
-          </button>
+            {expanded ? t.common.collapse : t.common.expand}
+            <ChevronDown className={cn('transition-transform', expanded && 'rotate-180')} />
+          </Button>
         </div>
       )}
     </div>
