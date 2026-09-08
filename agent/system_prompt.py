@@ -269,6 +269,20 @@ def _profile_name_for_home(home: Path) -> str:
         return "default"
 
 
+def _resolve_kanban_worker_guidance(agent: Any) -> str:
+    """Freeze worker identity, including for agents that bypass normal init."""
+    guidance = getattr(agent, "_kanban_worker_guidance", None)
+    if guidance is None:
+        from agent.delegation_context import is_dispatcher_owned_worker_context
+        worker = (
+            "kanban_show" in agent.valid_tool_names
+            and bool(os.environ.get("HERMES_KANBAN_TASK", "").strip())
+            and is_dispatcher_owned_worker_context()
+        )
+        agent._kanban_worker_guidance = guidance = KANBAN_GUIDANCE if worker else ""
+    return guidance
+
+
 def _tool_guidance_block(agent: Any) -> Optional[str]:
     """Tool-aware behavioral guidance, injected only when the tools are loaded."""
     names = agent.valid_tool_names
@@ -281,16 +295,11 @@ def _tool_guidance_block(agent: Any) -> Optional[str]:
             memory_guidance = MEMORY_GUIDANCE
         elif getattr(agent, "_user_profile_enabled", True):
             memory_guidance = USER_PROFILE_GUIDANCE
-    # Kanban lifecycle: resolved once at __init__ (_kanban_worker_guidance);
-    # the kanban_show fallback covers code paths that bypass agent_init.
-    _kanban_guidance = getattr(agent, "_kanban_worker_guidance", None)
-    if _kanban_guidance is None and "kanban_show" in names:
-        _kanban_guidance = KANBAN_GUIDANCE
     tool_guidance = [
         memory_guidance,
         SESSION_SEARCH_GUIDANCE if "session_search" in names else None,
         SKILLS_GUIDANCE if "skill_manage" in names else None,
-        _kanban_guidance,
+        _resolve_kanban_worker_guidance(agent),
     ]
     return " ".join(g for g in tool_guidance if g) or None
 
