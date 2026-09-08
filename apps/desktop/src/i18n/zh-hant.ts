@@ -3088,6 +3088,19 @@ export const zhHant = defineLocale({
       statusError: '錯誤',
       statusRecovered: '已復原',
       statusDone: '完成',
+      activity: {
+        payload: '輸入與輸出',
+        arguments: '輸入',
+        result: '輸出',
+        toolInstructions: { pending: '正在讀取工具說明', done: '已讀取工具說明' },
+        findTools: { pending: '正在尋找工具', done: '已尋找工具' },
+        readSkill: { pending: '正在讀取技能', done: '已讀取技能' },
+        reportedError: value => `回報的錯誤: ${value}`,
+        reportedStatus: value => `回報的狀態: ${value}`,
+        reportedPhase: value => `階段: ${value}`,
+        requestName: value => `請求: ${value}`,
+        returnedName: value => `回傳的名稱: ${value}`
+      },
       memoryWriteNoted: '已記下記憶寫入',
       actions: {
         read: '已讀取',

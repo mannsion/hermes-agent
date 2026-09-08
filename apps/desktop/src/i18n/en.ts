@@ -3623,6 +3623,19 @@ export const en: Translations = {
       statusError: 'Error',
       statusRecovered: 'Recovered',
       statusDone: 'Done',
+      activity: {
+        payload: 'Input and output',
+        arguments: 'Input',
+        result: 'Output',
+        toolInstructions: { pending: 'Reading tool instructions', done: 'Read tool instructions' },
+        findTools: { pending: 'Finding tools', done: 'Searched for tools' },
+        readSkill: { pending: 'Reading skill', done: 'Read skill' },
+        reportedError: value => `Reported error: ${value}`,
+        reportedStatus: value => `Reported status: ${value}`,
+        reportedPhase: value => `Phase: ${value}`,
+        requestName: value => `Request: ${value}`,
+        returnedName: value => `Returned name: ${value}`
+      },
       memoryWriteNoted: 'Memory write noted',
       actions: {
         read: 'Read',

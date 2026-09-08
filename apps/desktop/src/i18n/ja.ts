@@ -3195,6 +3195,19 @@ export const ja = defineLocale({
       statusError: 'エラー',
       statusRecovered: '回復しました',
       statusDone: '完了',
+      activity: {
+        payload: '入力と出力',
+        arguments: '入力',
+        result: '出力',
+        toolInstructions: { pending: 'ツールの使い方を確認中', done: 'ツールの使い方を確認' },
+        findTools: { pending: 'ツールを検索中', done: 'ツールを検索' },
+        readSkill: { pending: 'スキルを確認中', done: 'スキルを確認' },
+        reportedError: value => `報告されたエラー: ${value}`,
+        reportedStatus: value => `報告された状態: ${value}`,
+        reportedPhase: value => `フェーズ: ${value}`,
+        requestName: value => `リクエスト: ${value}`,
+        returnedName: value => `返された名前: ${value}`
+      },
       memoryWriteNoted: 'メモリへの書き込みを記録',
       actions: {
         read: '読み取り完了',

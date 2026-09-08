@@ -2748,6 +2748,19 @@ export const ar = defineLocale({
       statusError: 'خطأ',
       statusRecovered: 'تم الاسترداد',
       statusDone: 'تم',
+      activity: {
+        payload: 'المدخلات والمخرجات',
+        arguments: 'المدخلات',
+        result: 'المخرجات',
+        toolInstructions: { pending: 'جار قراءة تعليمات الأدوات', done: 'تمت قراءة تعليمات الأدوات' },
+        findTools: { pending: 'جار البحث عن أدوات', done: 'تم البحث عن أدوات' },
+        readSkill: { pending: 'جار قراءة المهارة', done: 'تمت قراءة المهارة' },
+        reportedError: value => `الخطأ المُبلّغ عنه: ${value}`,
+        reportedStatus: value => `الحالة المُبلّغ عنها: ${value}`,
+        reportedPhase: value => `المرحلة: ${value}`,
+        requestName: value => `الطلب: ${value}`,
+        returnedName: value => `الاسم المُعاد: ${value}`
+      },
       memoryWriteNoted: 'تم تسجيل كتابة الذاكرة',
       actions: {
         read: 'قراءة',

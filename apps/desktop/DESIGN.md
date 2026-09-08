@@ -236,6 +236,14 @@ Sizes: `default`, `xs`, `overlay` (titlebar glyph counts).
   border so code remains distinct from the transcript across themes.
 - A tool result may expose an inline action that opens a preview. It must not
   open the rail automatically.
+- Tool activity groups can be expanded while running. Preserve the user's
+  choice as calls arrive and the turn settles; approvals always remain visible.
+  A compact ticker selects an outstanding call, and clipped rows are inert.
+  MCP rows separate the operation from its server and show bounded request
+  names and last reported state/phase. A completed status check does not mean
+  its background job completed. Keep full input/output behind an explicit
+  disclosure; Product mode retains readable ordinary MCP output. This is
+  presentation of received events, not an independent job poller.
 - Install, onboarding, connecting, boot failure, and reauthentication are
   distinct states with shared visual primitives. Preserve their recovery
   semantics when unifying appearance.

@@ -3606,6 +3606,19 @@ export const ru = defineLocale({
       statusError: 'Ошибка',
       statusRecovered: 'Восстановлено',
       statusDone: 'Готово',
+      activity: {
+        payload: 'Входные и выходные данные',
+        arguments: 'Входные данные',
+        result: 'Выходные данные',
+        toolInstructions: { pending: 'Чтение инструкций инструментов', done: 'Инструкции инструментов прочитаны' },
+        findTools: { pending: 'Поиск инструментов', done: 'Поиск инструментов завершён' },
+        readSkill: { pending: 'Чтение навыка', done: 'Навык прочитан' },
+        reportedError: value => `Полученная ошибка: ${value}`,
+        reportedStatus: value => `Полученный статус: ${value}`,
+        reportedPhase: value => `Этап: ${value}`,
+        requestName: value => `Запрос: ${value}`,
+        returnedName: value => `Возвращённое имя: ${value}`
+      },
       memoryWriteNoted: 'Запись в память отмечена',
       actions: {
         read: 'Чтение',

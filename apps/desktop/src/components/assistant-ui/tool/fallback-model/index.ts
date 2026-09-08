@@ -5,6 +5,7 @@ import { capitalize, firstStringField, normalize } from '@/lib/text'
 import { isCardTool, isFileEditTool, isSilentTool } from '@/lib/tool-render-class'
 import { extractToolErrorMessage, formatToolResultSummary } from '@/lib/tool-result-summary'
 
+import { buildToolActivity } from './activity'
 import {
   browserExecStepLabel,
   compactPreview,
@@ -29,6 +30,7 @@ import type {
   ToolView
 } from './types'
 
+export { toolActivitySummary } from './activity'
 export * from './format'
 export * from './targets'
 export * from './types'
@@ -655,7 +657,7 @@ function extractSearchResults(result: unknown, limit = 6): SearchResultRow[] {
 function toolErrorText(part: ToolPart, result: Record<string, unknown>): string {
   const extractedError = extractToolErrorMessage(part.result)
 
-  if (part.isError) {
+  if (part.isError || result.isError === true) {
     return extractedError || (typeof part.result === 'string' && part.result.trim()) || 'Tool returned an error.'
   }
 
@@ -693,15 +695,44 @@ function toolErrorText(part: ToolPart, result: Record<string, unknown>): string 
   return ''
 }
 
-function toolStatus(part: ToolPart, resultRecord: Record<string, unknown>): ToolStatus {
+function toolStatus(
+  part: ToolPart,
+  resultRecord: Record<string, unknown>,
+  reportedResult?: Record<string, unknown>
+): ToolStatus {
   if (part.result === undefined) {
     return 'running'
+  }
+
+  // MCP call/envelope errors outrank contradictory success flags. An error
+  // inside a directly returned job record is still the job's reported error.
+  if (
+    part.toolName.startsWith('mcp__') &&
+    (part.isError ||
+      resultRecord.isError === true ||
+      (resultRecord.error && (!reportedResult || resultRecord.result != null)))
+  ) {
+    return 'error'
   }
 
   // Explicit success wins over isError / nested-error heuristics. Memory writes
   // return `{ success: true }` when the batch landed; a stale outer `isError`
   // envelope must not paint a real save amber.
   if (resultRecord.success === true || resultRecord.ok === true) {
+    return 'success'
+  }
+
+  // A status lookup may successfully report a failed background job. Only
+  // explicit call/envelope failures count as tool failures in this shape.
+  if (
+    reportedResult &&
+    !part.isError &&
+    resultRecord.success !== false &&
+    resultRecord.ok !== false &&
+    resultRecord.isError !== true &&
+    (resultRecord.result == null ||
+      (!resultRecord.error && !/\b(error|failed|failure)\b/i.test(String(resultRecord.status || ''))))
+  ) {
     return 'success'
   }
 
@@ -1411,8 +1442,9 @@ function dynamicTitle(
 export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
   const argsRecord = parseMaybeObject(part.args)
   const resultRecord = parseMaybeObject(part.result)
+  const activity = buildToolActivity(part)
   const meta = toolMeta(part.toolName)
-  const status = toolStatus(part, resultRecord)
+  const status = toolStatus(part, resultRecord, activity?.reportedResult)
   // Skip residual error-heuristic text once status is success (stale isError
   // envelope over a landed memory write would otherwise foul the subtitle).
   const error = status === 'success' ? '' : toolErrorText(part, resultRecord)
@@ -1426,24 +1458,33 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
         ? translateNow('assistant.tool.memoryWriteNoted')
         : meta.done
 
-  const titleParts = dynamicTitle(
-    part,
-    argsRecord,
-    resultRecord,
-    titlePartsFromAction(baseTitle, part.result === undefined ? meta.pendingAction : undefined)
-  )
+  const titleParts = activity
+    ? { title: activity.title }
+    : dynamicTitle(
+        part,
+        argsRecord,
+        resultRecord,
+        titlePartsFromAction(baseTitle, part.result === undefined ? meta.pendingAction : undefined)
+      )
 
   const title = titleParts.title
   const titleEnriched = title !== baseTitle
-  const baseSubtitle = error || toolSubtitle(part, argsRecord, resultRecord)
+  const baseSubtitle = error || (activity ? activity.subtitle : toolSubtitle(part, argsRecord, resultRecord))
 
   const keepSubtitleWithTitle =
+    Boolean(activity) ||
     part.toolName === 'terminal' ||
     part.toolName === 'execute_code' ||
     (isFileEditTool(part.toolName) && Boolean(baseSubtitle.trim()))
 
   const subtitle = titleEnriched && !error && !keepSubtitleWithTitle ? '' : baseSubtitle
-  const detailBody = stripDividerLines(toolDetailText(part, argsRecord, resultRecord))
+  // Collapsed activity is always bounded. Ordinary completed MCP output still
+  // earns its readable expanded body; structured job reports use the status summary.
+  const activityDetailOnly = activity && (!activity.serverLabel || part.result === undefined || activity.reportedResult)
+
+  const detailBody = stripDividerLines(
+    activityDetailOnly ? activity.detail : toolDetailText(part, argsRecord, resultRecord)
+  )
 
   const detail = error
     ? [error, detailBody]
@@ -1477,8 +1518,11 @@ export function buildToolView(part: ToolPart, inlineDiff: string): ToolView {
   const terminalExitCode = part.toolName === 'terminal' ? numericField(resultRecord, 'exit_code') : undefined
 
   return {
+    serverLabel: activity?.serverLabel,
+    activitySubtitle: activity?.subtitle,
     countLabel: resultCount ? formatCountLabel(resultCount) : undefined,
     detail,
+    plainTextDetail: Boolean(activityDetailOnly),
     detailLabel: error ? 'Error details' : toolDetailLabel(part.toolName),
     durationLabel: durationLabel(resultRecord),
     icon: meta.icon,

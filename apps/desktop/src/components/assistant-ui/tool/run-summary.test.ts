@@ -17,6 +17,25 @@ const running = (tools: ToolCallLike[]) => summarizeToolRun(tools, true)
 // edits and other cards are split out before a run is summarized, so there is
 // no "Edited …" clause to test here — that work shows as its own diff card.
 describe('summarizeToolRun', () => {
+  it('names the active MCP work and treats a returned job state as reported information', () => {
+    const inspect = tool('tool_describe', { names: ['mcp__game_audio__music_generate'] }, {})
+    const generate = tool('mcp__game_audio__music_generate', { request: { name: 'Opening theme' } })
+    expect(running([inspect, generate])).toBe('Running music generate · Opening theme')
+
+    const poll = tool(
+      'mcp__game_audio__music_job',
+      { job_id: 'job-1' },
+      {
+        result: JSON.stringify({ id: 'job-1', name: 'Opening theme', state: 'running', phase: 'planning' })
+      }
+    )
+
+    const summary = running([inspect, { ...generate, result: {} }, poll])
+    expect(summary).toContain('Music job · Opening theme · Reported status: running · Phase: planning')
+    expect(summary).not.toMatch(/Using|Running Music job/)
+    expect(settled([inspect, generate])).toBe('Used 2 tools')
+  })
+
   it('names a lone target and counts the rest', () => {
     expect(settled([searched('toolRuns'), read('a.ts'), read('b.ts'), read('c.ts')])).toBe('Explored 4 files')
   })

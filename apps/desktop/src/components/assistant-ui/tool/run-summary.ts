@@ -1,7 +1,7 @@
 import { summarizeShellCommand } from '@/lib/summarize-command'
 import { firstStringField } from '@/lib/text'
 
-import { fileEditBasename, isFileEditTool, parseMaybeObject } from './fallback-model'
+import { fileEditBasename, isFileEditTool, parseMaybeObject, toolActivitySummary } from './fallback-model'
 
 /**
  * The little a summary needs from a tool call, stated structurally so both
@@ -10,6 +10,7 @@ import { fileEditBasename, isFileEditTool, parseMaybeObject } from './fallback-m
  */
 export interface ToolCallLike {
   args?: unknown
+  isError?: boolean
   result?: unknown
   toolCallId?: string
   toolName: string
@@ -133,6 +134,14 @@ export function summarizeToolRun(tools: readonly ToolCallLike[], live: boolean):
   // showing anyway.
   const narrating = live ? (tools.find(isPending) ?? tools.at(-1)) : undefined
   const liveCategory = narrating ? toolCategory(narrating.toolName) : null
+
+  if (narrating && liveCategory === 'other') {
+    const activity = toolActivitySummary(narrating)
+
+    if (activity) {
+      return activity
+    }
+  }
 
   const byCategory = new Map<RunCategory, ToolCallLike[]>()
 

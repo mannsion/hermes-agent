@@ -15,12 +15,8 @@ import { formatTimelineRange } from '../thread/timestamp'
 // Timeline timestamps render only when `display.timestamps` is enabled.
 $displayTimestamps.set(true)
 
-// A run of tool calls collapses to a one-line summary once it has settled, but
-// a run with anything still pending always renders its rows. That rule is what
-// keeps the "approval must never be buried" bug fixed: an inline ApprovalBar
-// only ever exists on a pending tool, and a pending tool's run is never behind
-// a chevron. These cover both halves — the collapse itself, and the approval
-// staying in the visual flow.
+// Activity history can be expanded both during a turn and after it settles.
+// Approvals always remain in the visual flow, regardless of disclosure state.
 
 const createdAt = new Date('2026-06-03T00:00:00.000Z')
 
@@ -470,6 +466,51 @@ describe('transcript fade', () => {
 })
 
 describe('live tool run', () => {
+  it('updates streamed action details and keeps exact payload behind an explicit disclosure', async () => {
+    const original = groupedPendingMessage()
+
+    const describe = {
+      type: 'tool-call',
+      toolCallId: 'describe-tools',
+      toolName: 'tool_describe',
+      args: { names: ['mcp__game_audio__music_generate'] },
+      argsText: '{}',
+      result: {}
+    }
+
+    const generate = {
+      type: 'tool-call',
+      toolCallId: 'generate-music',
+      toolName: 'mcp__game_audio__music_generate',
+      args: {},
+      argsText: '{}'
+    }
+
+    const message = { ...original, content: [describe, generate] } as ThreadMessage
+    const { container, rerender } = render(<GroupHarness message={message} />)
+    await waitFor(() =>
+      expect(container.querySelector('[data-tool-summary]')?.textContent).toContain('Running music generate')
+    )
+    const args = { request: { name: 'Opening theme', caption: 'EXACT PRIVATE CAPTION' } }
+
+    const updated = {
+      ...message,
+      content: [describe, { ...generate, args, argsText: JSON.stringify(args) }]
+    } as ThreadMessage
+
+    rerender(<GroupHarness message={updated} />)
+    await waitFor(() => expect(container.querySelector('[data-tool-summary]')?.textContent).toContain('Opening theme'))
+    expect(container.querySelector('[data-tool-ticker-active] [data-tool-activity]')?.textContent).toBe('Opening theme')
+    expect(screen.queryByText(/EXACT PRIVATE CAPTION/)).toBeNull()
+    fireEvent.click(container.querySelector('[data-tool-ticker-active] [data-tool-row] button[aria-expanded]')!)
+    fireEvent.click(await screen.findByText('Input and output'))
+    expect(screen.getByText(/EXACT PRIVATE CAPTION/)).toBeTruthy()
+    expect(container.querySelector('[data-tool-ticker]')).toBeNull()
+    fireEvent.click(container.querySelector('[data-tool-summary] button')!)
+    expect(screen.queryByText(/EXACT PRIVATE CAPTION/)).toBeNull()
+    expect(container.querySelector('[data-tool-ticker]')).not.toBeNull()
+  })
+
   it('keeps its rows on screen instead of hiding them behind the summary', async () => {
     const { container } = render(<GroupHarness message={groupedPendingMessage()} />)
 
@@ -478,14 +519,80 @@ describe('live tool run', () => {
     })
   })
 
-  it('cannot be collapsed while a tool is still running', async () => {
-    const { container } = render(<GroupHarness message={groupedPendingMessage()} />)
+  it('lets live history stay open through new calls, completion, and remount', async () => {
+    const message = groupedPendingMessage()
+    const first = render(<GroupHarness message={message} />)
+    const header = () => first.container.querySelector('[data-tool-summary] button[aria-expanded]')!
 
+    await waitFor(() => expect(header()).not.toBeNull())
+    expect(header().getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(header())
+    expect(first.container.querySelector('[data-tool-ticker]')).toBeNull()
+
+    const next = {
+      ...message,
+      content: [
+        ...message.content,
+        {
+          type: 'tool-call',
+          toolCallId: 'read-next',
+          toolName: 'read_file',
+          args: { path: '/repo/next.ts' },
+          argsText: '{"path":"/repo/next.ts"}',
+          result: { content: 'next' }
+        }
+      ]
+    } as ThreadMessage
+
+    first.rerender(<GroupHarness message={next} />)
+    await waitFor(() => expect(first.container.querySelectorAll('[data-tool-row]')).toHaveLength(3))
+    expect(header().getAttribute('aria-expanded')).toBe('true')
+
+    const settled = { ...next, status: { type: 'complete', reason: 'stop' } } as ThreadMessage
+    first.rerender(<GroupHarness message={settled} />)
+    await waitFor(() => expect(header().getAttribute('aria-expanded')).toBe('true'))
+    first.unmount()
+    const restored = render(<GroupHarness message={settled} />)
+    await waitFor(() => expect(restored.container.querySelectorAll('[data-tool-row]')).toHaveLength(3))
+    fireEvent.click(restored.container.querySelector('[data-tool-summary] button')!)
+    expect(restored.container.querySelectorAll('[data-tool-row]')).toHaveLength(0)
+  })
+
+  it('shows concurrent pending calls and keeps hidden ticker rows out of keyboard navigation', async () => {
+    const message = groupedPendingMessage()
+
+    const pending = {
+      type: 'tool-call',
+      toolCallId: 'read-other',
+      toolName: 'read_file',
+      args: { path: '/repo/other.ts' },
+      argsText: '{"path":"/repo/other.ts"}'
+    }
+
+    const parallel = { ...message, content: [...message.content, pending] } as ThreadMessage
+    const { container, rerender } = render(<GroupHarness message={parallel} />)
+    await waitFor(() => expect(container.querySelectorAll('[data-tool-row]')).toHaveLength(3))
+    expect(container.querySelector('[data-tool-ticker]')).toBeNull()
+    fireEvent.click(container.querySelector('[data-tool-summary] button')!)
+    expect(container.querySelector('[data-tool-ticker]')).not.toBeNull()
+
+    const latestFinished = {
+      ...parallel,
+      content: [...message.content, { ...pending, result: { content: 'done' } }]
+    } as ThreadMessage
+
+    rerender(<GroupHarness message={latestFinished} />)
     await waitFor(() => {
-      expect(container.querySelector('[data-tool-summary]')).not.toBeNull()
+      const current = container.querySelector('[data-tool-ticker-active]')!
+      expect(current.textContent).toContain('rm -rf /tmp/x')
+      expect(current.hasAttribute('inert')).toBe(false)
     })
+    const hidden = container.querySelectorAll('[data-tool-ticker] .tool-ticker__row[aria-hidden="true"]')
+    expect(hidden).toHaveLength(2)
 
-    expect(container.querySelector('[data-tool-summary] button[aria-expanded]')).toBeNull()
+    for (const row of hidden) {
+      expect(row.hasAttribute('inert')).toBe(true)
+    }
   })
 
   // Liveness used to also require an unresolved call, which is false for the
@@ -497,7 +604,7 @@ describe('live tool run', () => {
 
     expect(await screen.findByText('Running 2 commands')).toBeTruthy()
     expect(container.querySelector('[data-tool-ticker]')).not.toBeNull()
-    expect(container.querySelector('[data-tool-summary] button[aria-expanded]')).toBeNull()
+    expect(container.querySelector('[data-tool-summary] button[aria-expanded="false"]')).not.toBeNull()
   })
 
   // The ticker is a one-line window, so a row opened inside it had its output
@@ -508,7 +615,7 @@ describe('live tool run', () => {
 
     await screen.findByText('Running 2 commands')
 
-    const row = container.querySelector('[data-tool-ticker] [data-tool-row] button[aria-expanded="false"]')
+    const row = container.querySelector('[data-tool-ticker-active] [data-tool-row] button[aria-expanded="false"]')
 
     expect(row).not.toBeNull()
 
@@ -565,7 +672,7 @@ describe('flat tool list approval surfacing', () => {
       expect(bar).not.toBeNull()
       // Flat rows live directly in the flow — nothing should ever wrap the bar
       // in a `hidden` subtree.
-      expect(bar?.closest('[hidden]')).toBeNull()
+      expect(bar?.closest('[hidden], [inert], [data-tool-ticker]')).toBeNull()
     })
   })
 

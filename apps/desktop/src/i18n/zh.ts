@@ -3765,6 +3765,19 @@ export const zh: Translations = {
       statusError: '错误',
       statusRecovered: '已恢复',
       statusDone: '完成',
+      activity: {
+        payload: '输入和输出',
+        arguments: '输入',
+        result: '输出',
+        toolInstructions: { pending: '正在读取工具说明', done: '已读取工具说明' },
+        findTools: { pending: '正在查找工具', done: '已查找工具' },
+        readSkill: { pending: '正在读取技能', done: '已读取技能' },
+        reportedError: value => `返回的错误: ${value}`,
+        reportedStatus: value => `返回的状态: ${value}`,
+        reportedPhase: value => `阶段: ${value}`,
+        requestName: value => `请求: ${value}`,
+        returnedName: value => `返回的名称: ${value}`
+      },
       memoryWriteNoted: '已记下记忆写入',
       actions: {
         read: '已读取',

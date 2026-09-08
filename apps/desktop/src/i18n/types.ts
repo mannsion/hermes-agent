@@ -3159,6 +3159,19 @@ export interface Translations {
       statusError: string
       statusRecovered: string
       statusDone: string
+      activity: {
+        payload: string
+        arguments: string
+        result: string
+        toolInstructions: { pending: string; done: string }
+        findTools: { pending: string; done: string }
+        readSkill: { pending: string; done: string }
+        reportedError: (value: string) => string
+        reportedStatus: (value: string) => string
+        reportedPhase: (value: string) => string
+        requestName: (value: string) => string
+        returnedName: (value: string) => string
+      }
       /** Over-budget / rejected memory write title — not "Saved to memory". */
       memoryWriteNoted: string
       actions: {

@@ -11,14 +11,21 @@ import { Children, type CSSProperties, isValidElement, type ReactNode } from 're
  * Shared by the tool run (its calls) and a delegation card (each subagent's
  * relayed stream), which are the same thing seen from two sides.
  */
-export function ToolRunTicker({ children }: { children: ReactNode }) {
+export function ToolRunTicker({ activeIndex, children }: { activeIndex?: number; children: ReactNode }) {
   const rows = Children.toArray(children)
+  const visibleIndex = Math.max(0, Math.min(activeIndex ?? rows.length - 1, rows.length - 1))
 
   return (
     <div className="tool-ticker" data-tool-ticker="">
-      <div className="tool-ticker__reel" style={{ '--tool-ticker-index': rows.length - 1 } as CSSProperties}>
+      <div className="tool-ticker__reel" style={{ '--tool-ticker-index': visibleIndex } as CSSProperties}>
         {rows.map((row, index) => (
-          <div className="tool-ticker__row" key={isValidElement(row) ? (row.key ?? index) : index}>
+          <div
+            aria-hidden={index !== visibleIndex ? true : undefined}
+            className="tool-ticker__row"
+            data-tool-ticker-active={index === visibleIndex ? '' : undefined}
+            inert={index !== visibleIndex}
+            key={isValidElement(row) ? (row.key ?? index) : index}
+          >
             {row}
           </div>
         ))}

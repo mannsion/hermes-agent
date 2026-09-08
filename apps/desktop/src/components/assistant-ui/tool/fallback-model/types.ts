@@ -30,8 +30,12 @@ export interface CountMetric {
 }
 
 export interface ToolView {
+  /** Bounded activity fields suitable for the collapsed product row. */
+  activitySubtitle?: string
   countLabel?: string
   detail: string
+  /** Structured status text retains its field boundaries when expanded. */
+  plainTextDetail?: boolean
   detailLabel: string
   durationLabel?: string
   icon?: string
@@ -45,6 +49,8 @@ export interface ToolView {
   /** Original query, shown above structured web-search results. */
   searchQuery?: string
   searchHits?: SearchResultRow[]
+  /** MCP server identity, separate from the operation title. */
+  serverLabel?: string
   /** When the backend reports stderr as a separate stream (terminal /
    *  execute_code), the renderer shows it as its own labeled, neutrally
    *  tinted block under stdout — distinct from an error tone. */

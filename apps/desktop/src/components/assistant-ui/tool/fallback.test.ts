@@ -69,12 +69,12 @@ describe('splitRunItems', () => {
 describe('technicalTrace', () => {
   it('indents object payloads and persisted JSON strings', () => {
     expect(technicalTrace({ offset: 2, path: '/tmp/demo.txt' }, '{"success":true,"lines":["a","b"]}')).toBe(
-      'Arguments:\n{\n  "offset": 2,\n  "path": "/tmp/demo.txt"\n}\n\nResult:\n{\n  "success": true,\n  "lines": [\n    "a",\n    "b"\n  ]\n}'
+      'Input:\n{\n  "offset": 2,\n  "path": "/tmp/demo.txt"\n}\n\nOutput:\n{\n  "success": true,\n  "lines": [\n    "a",\n    "b"\n  ]\n}'
     )
   })
 
   it('leaves scalar strings untouched', () => {
-    expect(technicalTrace(undefined, 'plain text')).toBe('Result:\nplain text')
-    expect(technicalTrace(undefined, '"already quoted"')).toBe('Result:\n"already quoted"')
+    expect(technicalTrace(undefined, 'plain text')).toBe('Output:\nplain text')
+    expect(technicalTrace(undefined, '"already quoted"')).toBe('Output:\n"already quoted"')
   })
 })
