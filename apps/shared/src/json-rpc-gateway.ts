@@ -184,7 +184,22 @@ export class JsonRpcGatewayClient {
 
     this.setState('connecting')
 
-    const socket = this.options.socketFactory?.(wsUrl) ?? new WebSocket(wsUrl)
+    let socket: WebSocketLike
+
+    try {
+      socket = this.options.socketFactory?.(wsUrl) ?? new WebSocket(wsUrl)
+    } catch (error) {
+      // Construction can reject synchronously before handshake cleanup exists.
+      // Retire any previous generation and leave the client safe to redial.
+      if (this.socket) {
+        this.invalidateSocket(this.socket, error instanceof Error ? error : new Error(String(error)))
+      }
+
+      this.stopHeartbeat()
+      this.setState('error')
+      throw error
+    }
+
     this.socket = socket
     this.stopHeartbeat()
 

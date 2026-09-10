@@ -190,14 +190,31 @@ def get_provider_auth_policy(config: Mapping[str, Any] | None = None) -> Provide
     if scoped is not None:
         return scoped
     from hermes_constants import get_hermes_home
-    home = get_hermes_home().resolve()
+    home = get_hermes_home()
+    try:
+        home = home.resolve()
+        if config is None:
+            stamps = (_file_stamp(home / "config.yaml"), _file_stamp(home / ".env"))
+    except (OSError, RuntimeError) as exc:
+        # Resolving/stating paths can fail before the YAML reader is reached.
+        raise _policy_config_error(home) from exc
     if config is None:
-        path = home / "config.yaml"
         # Read the selected configuration to determine mode. Auto preserves
         # native support for dotfile symlinks; strict mode validates its path
         # before making any configured credential available.
-        return _cached_policy(home, _file_stamp(path), _file_stamp(home / ".env"))
+        return _cached_policy(home, *stamps)
     return _build_policy(home, config)
+
+
+def _policy_config_error(home: Path):
+    from hermes_cli.auth_constants import AuthError
+
+    return AuthError(
+        f"Cannot read provider policy from config.yaml at {home / 'config.yaml'}. "
+        "Fix the YAML mapping, file permissions, and symlink targets, then retry; "
+        "no inference provider or credentials were selected.",
+        code="corrupt_config",
+    )
 
 
 def _file_stamp(path: Path) -> tuple:
@@ -215,12 +232,14 @@ def _cached_policy(home: Path, config_stamp: tuple, env_stamp: tuple) -> Provide
     # inodes, so rotation/removal invalidates a snapshot without reparsing YAML
     # at every provider lookup. Request scopes keep their existing snapshot.
     import yaml
+    from hermes_cli.config import InvalidUserConfigError, read_user_config_raw
+
     try:
-        config = yaml.safe_load((home / "config.yaml").read_text(encoding="utf-8-sig")) or {}
-    except FileNotFoundError:
-        config = {}
-    if not isinstance(config, dict):
-        raise ProviderPolicyError("config.yaml must contain a mapping")
+        config = read_user_config_raw(home / "config.yaml", require_mapping=True)
+    except (yaml.YAMLError, OSError, UnicodeError, InvalidUserConfigError) as exc:
+        # Unknown policy must never become auto, even for an explicit provider.
+        # Do not include parser source snippets: YAML can contain credentials.
+        raise _policy_config_error(home) from exc
     return _build_policy(home, config)
 
 

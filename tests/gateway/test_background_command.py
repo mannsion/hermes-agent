@@ -230,6 +230,25 @@ class TestHandleBtwCommand:
         assert "/btw" in result
 
     @pytest.mark.asyncio
+    async def test_unreadable_transcript_returns_recovery_without_inference(self):
+        from gateway.session_transcript import TranscriptReadError
+        from gateway.slash_commands_status import HISTORY_UNREADABLE
+
+        runner = _make_runner()
+        store = AsyncMock()
+        store.get_or_create_session.return_value = MagicMock(session_id="s1")
+        store.load_transcript.side_effect = TranscriptReadError("unreadable test transcript")
+        store._store = runner.session_store
+        runner._async_session_store = store
+        runner._resolve_session_agent_runtime = MagicMock()
+        with patch("agent.side_question.answer_side_question") as answer:
+            result = await runner._handle_btw_command(_make_event(text="/btw what happened?"))
+        assert result == HISTORY_UNREADABLE
+        runner._resolve_session_agent_runtime.assert_not_called()
+        answer.assert_not_called()
+        assert not runner._background_tasks
+
+    @pytest.mark.asyncio
     async def test_no_history_reports_no_conversation(self):
         runner = _make_runner()
         store = AsyncMock()

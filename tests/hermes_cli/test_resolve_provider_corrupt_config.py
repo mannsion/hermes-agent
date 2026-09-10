@@ -11,8 +11,8 @@ consent.
 The fix: ``hermes_cli.config`` records active parse failures
 (``get_active_config_parse_failure``), and ``resolve_provider`` refuses
 env/pool auto-adoption with ``AuthError(code='corrupt_config')`` while the
-active config is corrupt. Explicit provider requests and valid-config
-env-sniff flows are untouched, and fixing the file in place clears the block.
+active config is corrupt. Explicit requests also fail closed because a broken file cannot establish
+whether config-only credential isolation is active; valid-config env-sniff flows are untouched, and fixing the file in place clears the block.
 """
 
 import uuid
@@ -99,8 +99,7 @@ class TestResolveProviderCorruptConfig:
 
     def test_corrupt_config_blocks_pool_probe_adoption(self, tmp_path, monkeypatch):
         """Corrupt config + pool-only credential must NOT resolve to openrouter."""
-        _setup_home(tmp_path, monkeypatch, CORRUPT_YAML)
-        _load_config_fresh()
+        _home, cfg = _setup_home(tmp_path, monkeypatch, VALID_YAML)
 
         from agent.credential_pool import (
             AUTH_TYPE_API_KEY,
@@ -122,6 +121,8 @@ class TestResolveProviderCorruptConfig:
                 base_url="https://openrouter.ai/api/v1",
             )
         )
+
+        cfg.write_text(CORRUPT_YAML)
 
         from hermes_cli.auth import AuthError, resolve_provider
 
@@ -153,12 +154,14 @@ class TestResolveProviderCorruptConfig:
         cfg.write_text(VALID_YAML)
         assert resolve_provider("auto") == "openrouter"
 
-    def test_explicit_provider_request_untouched(self, tmp_path, monkeypatch):
-        """Explicit user intent (requested != auto) resolves even with corrupt config."""
+    def test_explicit_provider_request_cannot_bypass_unknown_policy(self, tmp_path, monkeypatch):
+        """Naming a provider does not authorize bypassing unreadable credential policy."""
         _setup_home(tmp_path, monkeypatch, CORRUPT_YAML)
         monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-FAKE1234567890")
         _load_config_fresh()
 
-        from hermes_cli.auth import resolve_provider
+        from hermes_cli.auth import AuthError, resolve_provider
 
-        assert resolve_provider("openrouter") == "openrouter"
+        with pytest.raises(AuthError) as excinfo:
+            resolve_provider("openrouter")
+        assert excinfo.value.code == "corrupt_config"

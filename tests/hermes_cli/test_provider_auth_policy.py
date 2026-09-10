@@ -336,3 +336,61 @@ def test_auto_config_symlink_remains_supported_but_strict_cannot_escape(provider
     external.write_text("provider_auth: {mode: config_only}\n")
     with pytest.raises(ProviderPolicyError, match="leaves"):
         get_provider_auth_policy()
+
+
+@pytest.mark.parametrize("broken", ["provider_auth: [unterminated", "[]", "false", "0"])
+def test_corrupt_policy_blocks_credentials_and_recovers_after_repair(provider_home, monkeypatch, broken):
+    from hermes_cli.auth import AuthError
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+
+    configure(provider_home)
+    assert get_provider_auth_policy().config_only
+    monkeypatch.setenv("OPENROUTER_API_KEY", "foreign-router-key")
+    (provider_home / "config.yaml").write_text(broken)
+    # No config load/warning precondition: direct credential and runtime paths
+    # must independently refuse an unknown policy, never use ambient secrets.
+    for resolve in (get_provider_auth_policy, lambda: resolve_runtime_provider(requested="openrouter")):
+        with pytest.raises(AuthError) as error:
+            resolve()
+        assert error.value.code == "corrupt_config"
+    configure(provider_home)
+    runtime = resolve_runtime_provider()
+    assert runtime["provider_auth_policy"].config_only
+    assert runtime["base_url"] == "http://127.0.0.1:4321/v1"
+    assert runtime["api_key"] == "no-key-required"
+
+
+@pytest.mark.linux_only
+def test_inaccessible_policy_home_reports_auth_error_and_recovers(provider_home):
+    import os
+
+    from hermes_cli.auth_constants import AuthError
+
+    if os.geteuid() == 0:
+        pytest.skip("root can read a directory despite chmod(0)")
+    configure(provider_home)
+    provider_home.chmod(0)
+    try:
+        with pytest.raises(AuthError) as error:
+            get_provider_auth_policy()
+        assert error.value.code == "corrupt_config"
+    finally:
+        provider_home.chmod(0o700)
+    assert get_provider_auth_policy().config_only
+
+
+@pytest.mark.linux_only
+@pytest.mark.parametrize("filename", ["config.yaml", ".env"])
+def test_policy_symlink_loop_reports_auth_error_and_recovers(provider_home, filename):
+    from hermes_cli.auth_constants import AuthError
+
+    configure(provider_home)
+    path = provider_home / filename
+    path.unlink(missing_ok=True)
+    path.symlink_to(path)
+    with pytest.raises(AuthError) as error:
+        get_provider_auth_policy()
+    assert error.value.code == "corrupt_config"
+    path.unlink()
+    configure(provider_home)
+    assert get_provider_auth_policy().config_only

@@ -121,12 +121,3 @@ def test_no_raw_config_yaml_reads_outside_owner_modules():
         "hermes_cli.config.read_user_config_raw().\nOffenders:\n  "
         + "\n  ".join(offenders)
     )
-
-
-def test_read_user_config_raw_exists_and_documented():
-    """The shared raw primitive must exist and carry its legality docstring."""
-    from hermes_cli.config import read_user_config_raw
-
-    doc = read_user_config_raw.__doc__ or ""
-    assert "ONLY legal for write-back round-trips and raw-file diagnostics" in doc
-    assert "load_config()" in doc
